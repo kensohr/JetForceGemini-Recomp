@@ -61,7 +61,7 @@ int main(int argc,char **argv) {
     invalid("");invalid(std::string(8193,'x'));invalid(custom+"enabled=0\n");invalid(custom+"unknown=0\n");
     invalid(custom.substr(custom.find('\n')+1));
     for(auto pair:std::array<std::pair<std::string,std::string>,10>{{
-        {"version=7","version=8"},{"enabled=1","enabled=2"},{"aim_toggle=1","aim_toggle=-1"},
+        {"version=8","version=9"},{"enabled=1","enabled=2"},{"aim_toggle=1","aim_toggle=-1"},
         {"pad.jump=10","pad.jump=27"},{"key.fire=70","key.fire=258"},
         {"movement_stick=0","movement_stick=2"},{"movement_deadzone=7849","movement_deadzone=32768"},
         {"axis_threshold=8689","axis_threshold=0"},{"look.modern=1","look.modern=0"},
@@ -74,10 +74,28 @@ int main(int argc,char **argv) {
     check(ModernControlsConfig{}.pad_floyd_flight_invert_y,"controller flight defaults inverted");
     auto flightConfig=config;flightConfig.pad_floyd_flight_invert_y=false;
     check(parse_modern_controls(serialize_modern_controls(flightConfig),parsed) && !parsed.pad_floyd_flight_invert_y && parsed.look.aim_invert_y==config.look.aim_invert_y,"flight saves independently of look inversion");
+    check(ModernControlsConfig{}.ground_movement==ModernGroundMovement::run_toward_input,"ground movement defaults to running toward input");
+    auto strafeConfig=config;strafeConfig.ground_movement=ModernGroundMovement::face_camera;
+    // Load the non-default choice first so a migration check cannot pass on stale state.
+    const auto primeFaceCamera=[&]{
+        check(parse_modern_controls(serialize_modern_controls(strafeConfig),parsed) && parsed.ground_movement==ModernGroundMovement::face_camera,"face-the-camera choice survives save and reload");
+    };
+    primeFaceCamera();
+    check(parse_modern_controls(defaults,parsed) && parsed.ground_movement==ModernGroundMovement::run_toward_input,"run-toward-input choice survives save and reload");
+    check(defaults.starts_with("version=8\n"),"profiles save at schema version 8");
+    const std::string groundField="movement.ground=0\n";
+    check(defaults.find(groundField)!=defaults.npos,"profiles save the ground movement row");
+    auto version7=defaults;version7.erase(version7.find(groundField),groundField.size());
+    const auto missingGround=version7;version7.replace(0,9,"version=7");
+    primeFaceCamera();
+    check(parse_modern_controls(version7,parsed) && parsed.ground_movement==ModernGroundMovement::run_toward_input,"v7 migrates to running toward input");
+    invalid(version7+groundField);invalid(version7+"movement.ground=1\n");invalid(missingGround);invalid(defaults+groundField);
+    for(const auto value:{-1,2}) {auto bad=defaults;bad.replace(bad.find(groundField),groundField.size(),"movement.ground="+std::to_string(value)+"\n");invalid(bad);}
     const std::string flightField="pad_floyd_flight_invert_y=1\n";
-    auto legacyDefaults=defaults;legacyDefaults.erase(legacyDefaults.find(flightField),flightField.size());
+    auto legacyDefaults=missingGround;legacyDefaults.erase(legacyDefaults.find(flightField),flightField.size());
     auto version6=legacyDefaults;version6.replace(0,9,"version=6");
-    check(parse_modern_controls(version6,parsed) && parsed.pad_floyd_flight_invert_y,"v6 preserves original flight steering");
+    primeFaceCamera();
+    check(parse_modern_controls(version6,parsed) && parsed.pad_floyd_flight_invert_y && parsed.ground_movement==ModernGroundMovement::run_toward_input,"v6 preserves original flight steering and migrates ground movement");
     invalid(version6+flightField);invalid(legacyDefaults);invalid(defaults+flightField);
     for(const auto value:{-1,2}) {auto bad=defaults;bad.replace(bad.find(flightField),flightField.size(),"pad_floyd_flight_invert_y="+std::to_string(value)+"\n");invalid(bad);}
     for(int y:{-128,-80,0,80,127}) {
@@ -94,7 +112,8 @@ int main(int argc,char **argv) {
         legacyDefaults.erase(at,field.size());
     }
     auto version5=legacyDefaults;version5.replace(0,9,"version=5");
-    check(parse_modern_controls(version5,parsed) && parsed.automatic_roll &&
+    primeFaceCamera();
+    check(parse_modern_controls(version5,parsed) && parsed.automatic_roll && parsed.ground_movement==ModernGroundMovement::run_toward_input &&
         parsed.pad[index(ModernAction::roll_left)]==-1 && parsed.pad[index(ModernAction::roll_right)]==-1 &&
         parsed.keys[index(ModernAction::roll_left)]==0 && parsed.keys[index(ModernAction::roll_right)]==0,"v5 migrates automatic rolling without new binds");
     invalid(version5+"roll.automatic=1\n");
@@ -136,7 +155,9 @@ int main(int argc,char **argv) {
     version1.replace(0,std::string("version=3").size(),"version=1");
     for(const std::string field:{"mouse_scope_sensitivity=100\n","pad_scope_sensitivity=100\n"})
         version1.erase(version1.find(field),field.size());
-    check(parse_modern_controls(version1,parsed) && parsed.mouse_scope_sensitivity==100 && parsed.pad_scope_sensitivity==100 && !parsed.mouse_original_acceleration,"v1 profiles retain original scope feel");
+    primeFaceCamera();
+    check(parse_modern_controls(version1,parsed) && parsed.mouse_scope_sensitivity==100 && parsed.pad_scope_sensitivity==100 && !parsed.mouse_original_acceleration &&
+        parsed.ground_movement==ModernGroundMovement::run_toward_input,"v1 profiles retain original scope feel and run toward input");
     invalid(version1+"mouse_scope_sensitivity=100\n");
     config.mouse_scope_sensitivity=55;config.pad_scope_sensitivity=175;
     check(parse_modern_controls(serialize_modern_controls(config),parsed) &&
