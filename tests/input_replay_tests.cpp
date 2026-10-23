@@ -603,6 +603,22 @@ void test_recorded_original_acceleration_replays_as_recorded() {
     }
 }
 
+void test_replay_modern_controls_report_any_held_change() {
+    const auto modern_sample=[](const std::uint8_t flags) {
+        return jfg::ControllerReplaySample{true,0,0,0,3,0,0,static_cast<std::uint8_t>(jfg::kModernActionsFlag|flags)};
+    };
+    jfg::ReplayModernControls modern;
+    check(modern.observe(modern_sample(0U)) && modern.active(),"turning Modern on is a change");
+    check(!modern.observe(modern_sample(0U)),"repeating the held values is no change");
+    check(modern.observe(modern_sample(jfg::kModernRunTowardInputFlag)) &&
+        modern.ground_movement()==jfg::ModernGroundMovement::run_toward_input,
+        "a Ground movement change alone is a change");
+    check(!modern.observe(modern_sample(jfg::kModernRunTowardInputFlag)),"repeating Run toward input is no change");
+    check(modern.observe(modern_sample(jfg::kModernRunTowardInputFlag|jfg::kModernOriginalAccelerationFlag)) &&
+        modern.original_acceleration(),"an Original movement acceleration change alone is a change");
+    check(!modern.observe(jfg::ControllerReplaySample{}),"a neutral flag-0 sample is no change");
+}
+
 }  // namespace
 
 int main() {
@@ -627,5 +643,6 @@ int main() {
     test_original_acceleration_recording();
     test_replay_original_acceleration_follows_recording();
     test_recorded_original_acceleration_replays_as_recorded();
+    test_replay_modern_controls_report_any_held_change();
     return failures == 0 ? 0 : 1;
 }

@@ -1496,6 +1496,23 @@ struct LiveViFieldRegisters final {
 };
 #endif
 
+// The Modern Controls values a loaded replay decides for a player; the live
+// profile supplies everything else.
+struct ReplayOwnedModernControls {
+  bool enabled=false;
+  jfg::ModernGroundMovement ground_movement=jfg::ModernGroundMovement::face_camera;
+  bool original_acceleration=false;
+  bool operator==(const ReplayOwnedModernControls&) const=default;
+};
+ReplayOwnedModernControls replay_owned_modern_controls(const jfg::ModernControlsConfig& config) {
+  return {config.enabled,config.ground_movement,config.mouse_original_acceleration};
+}
+void apply_replay_owned_modern_controls(const ReplayOwnedModernControls& owned,jfg::ModernControlsConfig& config) {
+  config.enabled=owned.enabled;
+  config.ground_movement=owned.ground_movement;
+  config.mouse_original_acceleration=owned.original_acceleration;
+}
+
 struct State : JfgOriginalTimingFast {
   State() : JfgOriginalTimingFast{} { execution_fast_revision = UINT64_MAX; }
   bool ledgered = false;
@@ -1805,6 +1822,9 @@ struct State : JfgOriginalTimingFast {
   jfg::DeterministicInputReplay input_replay;
   bool input_replay_loaded = false;
   jfg::ReplayModernControls replay_modern_controls;
+  // Live profile values a loaded replay last overrode, per port, so the
+  // override is traced once per change instead of on every profile reload.
+  std::array<std::optional<ReplayOwnedModernControls>,4> replay_overridden_live_controls{};
   bool input_replay_by_poll = false;
   bool input_replay_recorded_time = false;
   bool input_replay_gameplay_time = false, replay_gameplay_clock_ready = false;
@@ -2691,9 +2711,10 @@ public:
     view.movement_before_update={std::bit_cast<float>(ram.u32(control+0x10U)),
                                  std::bit_cast<float>(ram.u32(control+4U))};
     view.retrace=state.vi_retraces;view.aiming=aiming;
+    const bool view_locked=modern_view_locked(state,port,movement,view.air_aim);
     // The camera follows as a leash exactly when the body is not locked to
     // the view (camera-relative running). Any other update reseeds it.
-    view.leash_camera=!view_only && !modern_view_locked(state,port,movement,view.air_aim);
+    view.leash_camera=!view_only && !view_locked;
     if(!view.leash_camera)view.leash.following=false;
     if(!aiming && !state.pc_input_blocked) {
       auto look=jfg::PcLookDelta{frame.look_x,frame.look_y};
@@ -2711,15 +2732,19 @@ public:
         static_cast<std::uint16_t>(view.pitch),ram.u32(0x800F6DBCU)});
       return; // Camera only: no facing, velocity, action or recovery-timer writes.
     }
-    const bool view_locked=modern_view_locked(state,port,movement,view.air_aim);
     // The original airborne handler owns momentum heading and air steering.
     // Body/view orientation is restored after physics consumes that heading.
-    if(movement==3U) {
+    if(movement==jfg::kMovementStateAirborne) {
       if(view_locked)ram.put16(actor,ram.u16(control+0x11CU));
-    } else if(view_locked) {
-      view.movement_before_update=jfg::pc_velocity_in_view(view.movement_before_update,
-        view.movement_before_yaw,view.yaw);
-      view.movement_before_yaw=view.yaw;
+      return;
+    }
+    // Hold the captured velocity in the view's frame even while running toward
+    // input, so a switch to Face the camera before physics reads it does not
+    // rotate it by the native heading.
+    view.movement_before_update=jfg::pc_velocity_in_view(view.movement_before_update,
+      view.movement_before_yaw,view.yaw);
+    view.movement_before_yaw=view.yaw;
+    if(view_locked) {
       ram.put16(actor,static_cast<std::uint16_t>(view.yaw));
       ram.put16(control+0x11CU,static_cast<std::uint16_t>(view.yaw));
       ram.put16(control+0x10AU,0);
@@ -2773,12 +2798,12 @@ void modern_shoulder_physics(State &state,std::uint32_t target,const recomp_cont
       static_cast<std::uint16_t>(view.yaw),static_cast<std::uint16_t>(view.pitch)});
   }
   view.aiming=aiming;
-  if(movement==3U) {
+  if(movement==jfg::kMovementStateAirborne) {
     // Camera-relative running takes off with the native heading and speed.
-    if(view.movement_before_state!=3U &&
+    if(view.movement_before_state!=jfg::kMovementStateAirborne &&
        !modern_view_locked(state,port,view.movement_before_state,view.air_aim))
-      view.movement_before_state=3U;
-    if(view.movement_before_state!=3U) {
+      view.movement_before_state=jfg::kMovementStateAirborne;
+    if(view.movement_before_state!=jfg::kMovementStateAirborne) {
       const auto momentum=jfg::pc_native_airborne_motion(view.movement_before_update,
         view.movement_before_yaw,ram.u8(control+0x569U)!=0);
       hle::GuestMemory memory({state.rdram,kRdramSize},hle::GuestMemory::Layout::native_word_big_endian);
@@ -2836,7 +2861,7 @@ public:
     if(modern_shoulder_current(state,port,actor) &&
        state.pc_shoulders[port].movement_before_state!=4U &&
        (!state.pc_shoulders[port].water_origin || modern_air_aim_active(state,actor,control)) &&
-       modern_view_locked(state,port,3U,state.pc_shoulders[port].air_aim)) {
+       modern_view_locked(state,port,jfg::kMovementStateAirborne,state.pc_shoulders[port].air_aim)) {
       actor_=actor;port_=port;
     }
   }
@@ -2897,7 +2922,9 @@ public:
     // Camera-relative running turns the body into motion, so the native
     // clip selection is already correct there.
     const auto port=jfg::mod::pc_input_port(ram,ram.u8(control));
-    if(ram.u8(control+0x568U)==0U && modern_view_locked(state,port,0U,false))
+    constexpr bool kNoAirAim=false;
+    const bool ground_view_locked=modern_view_locked(state,port,jfg::kMovementStateGround,kNoAirAim);
+    if(ram.u8(control+0x568U)==jfg::kMovementStateGround && ground_view_locked)
       context.r6=jfg::pc_ground_animation(character,requested,family,
         {std::bit_cast<float>(ram.u32(control+0x10U)),std::bit_cast<float>(ram.u32(control+4U))});
     state.gameplay_trace.event("pc-locomotion",{state.vi_retraces,actor,ram.u8(control+0x568U),
@@ -3266,13 +3293,38 @@ void set_modern_controls_active(State &state,bool active) {
   }
   (void)state.controller_input_gate.blocked(true,state.controller_ports.samples);
 }
-// A replay decides player 1's style from its samples; players 2-4 replay blank.
+// A replay decides player 1's style, Ground movement and Original movement
+// acceleration from its samples; players 2-4 replay blank.
 void apply_replay_modern_controls(State &state) {
-  const bool modern=state.replay_modern_controls.active();
-  for(std::size_t p=0;p<state.modern_controls.size();++p)state.modern_controls[p].enabled=p==0U && modern;
-  state.modern_controls[0].ground_movement=state.replay_modern_controls.ground_movement();
-  state.modern_controls[0].mouse_original_acceleration=state.replay_modern_controls.original_acceleration();
-  set_modern_controls_active(state,modern);
+  const auto& replay=state.replay_modern_controls;
+  const ReplayOwnedModernControls player1{replay.active(),replay.ground_movement(),replay.original_acceleration()};
+  apply_replay_owned_modern_controls(player1,state.modern_controls[0]);
+  for(std::size_t p=1;p<state.modern_controls.size();++p)state.modern_controls[p].enabled=false;
+  set_modern_controls_active(state,player1.enabled);
+}
+// Records each player 1 value a replay sample changed.
+void trace_replay_modern_controls(State &state,const jfg::ReplayModernControls &before) {
+  const auto& after=state.replay_modern_controls;
+  if(after.active()!=before.active())
+    state.gameplay_trace.event("replay-modern-controls",{state.vi_retraces,after.active()?1U:0U});
+  if(after.ground_movement()!=before.ground_movement())
+    state.gameplay_trace.event("replay-ground-movement",{state.vi_retraces,static_cast<unsigned>(after.ground_movement())});
+  if(after.original_acceleration()!=before.original_acceleration())
+    state.gameplay_trace.event("replay-original-acceleration",{state.vi_retraces,after.original_acceleration()?1U:0U});
+}
+// Traces a live profile change a loaded replay overrides, once per distinct
+// live value set; the profile is re-read every 250 ms.
+void trace_replay_overrides_live_profile(State &state,std::size_t port,
+                                         const ReplayOwnedModernControls &live,const ReplayOwnedModernControls &replayed) {
+  auto& reported=state.replay_overridden_live_controls[port];
+  if(live==replayed) {
+    reported.reset();
+    return;
+  }
+  if(reported==live)return;
+  reported=live;
+  state.gameplay_trace.event("replay-keeps-modern-controls",{state.vi_retraces,port,
+    live.enabled?1U:0U,static_cast<unsigned>(live.ground_movement),live.original_acceleration?1U:0U});
 }
 void reload_controller_ports(State &state) {
   const auto now = std::chrono::steady_clock::now();
@@ -3297,9 +3349,9 @@ void reload_controller_ports(State &state) {
       // The live profile must not change a replay's recorded style, Ground
       // movement or Original movement acceleration.
       if(state.input_replay_loaded) {
-        candidate.enabled=state.modern_controls[p].enabled;
-        candidate.ground_movement=state.modern_controls[p].ground_movement;
-        candidate.mouse_original_acceleration=state.modern_controls[p].mouse_original_acceleration;
+        const auto replayed=replay_owned_modern_controls(state.modern_controls[p]);
+        if(parsed)trace_replay_overrides_live_profile(state,p,replay_owned_modern_controls(candidate),replayed);
+        apply_replay_owned_modern_controls(replayed,candidate);
       }
       if(parsed &&
          jfg::serialize_modern_controls(candidate)!=jfg::serialize_modern_controls(state.modern_controls[p])) {
@@ -3671,21 +3723,12 @@ void sample_live_controller(State &state) noexcept {
           ? state.input_replay.sample_by_poll(state.controller_samples)
           : state.input_replay.sample_at(state.vi_retraces);
     }
+    // v9 samples carry player 1's Ground movement and Original movement
+    // acceleration; either may change without a style change.
+    const auto replay_before=state.replay_modern_controls;
     if(state.replay_modern_controls.observe(replay)) {
-      state.gameplay_trace.event("replay-modern-controls",{state.vi_retraces,state.replay_modern_controls.active()?1U:0U});
+      trace_replay_modern_controls(state,replay_before);
       apply_replay_modern_controls(state);
-    }
-    // v9 samples carry player 1's Ground movement; it may change without a style change.
-    const auto replay_ground=state.replay_modern_controls.ground_movement();
-    if(state.modern_controls[0].ground_movement!=replay_ground) {
-      state.gameplay_trace.event("replay-ground-movement",{state.vi_retraces,static_cast<unsigned>(replay_ground)});
-      state.modern_controls[0].ground_movement=replay_ground;
-    }
-    // v9 samples also carry player 1's Original movement acceleration option.
-    const bool replay_acceleration=state.replay_modern_controls.original_acceleration();
-    if(state.modern_controls[0].mouse_original_acceleration!=replay_acceleration) {
-      state.gameplay_trace.event("replay-original-acceleration",{state.vi_retraces,replay_acceleration?1U:0U});
-      state.modern_controls[0].mouse_original_acceleration=replay_acceleration;
     }
     if(state.modern_controls_active)state.pc_frames[0]=replay;
     menu_kind=replay.menu_kind;menu_target=replay.menu_target;
