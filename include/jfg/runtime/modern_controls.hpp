@@ -354,12 +354,19 @@ inline constexpr std::uint8_t kModernActionsFlag=0x80;
 // v9+: player 1 was on Ground movement Run toward input for this poll; a
 // clear bit means Face the camera. Only valid together with kModernActionsFlag.
 inline constexpr std::uint8_t kModernRunTowardInputFlag=0x20;
+// v9+: player 1 had Original movement acceleration on for this poll. It records
+// the option itself, on any pc_mode; only valid together with kModernActionsFlag.
+inline constexpr std::uint8_t kModernOriginalAccelerationFlag=0x40;
 // The v9 recorder's modern_flags for one poll: the live flags plus player 1's
-// effective Ground movement. Samples without Modern identity stay unchanged.
-inline std::uint8_t modern_recorded_flags(std::uint8_t live_flags,ModernGroundMovement ground) {
+// effective Ground movement and Original movement acceleration option.
+// Samples without Modern identity stay unchanged.
+inline std::uint8_t modern_recorded_flags(std::uint8_t live_flags,const ModernControlsConfig &player1) {
     const bool modern_sample=(live_flags&kModernActionsFlag)!=0;
-    if(!modern_sample || ground!=ModernGroundMovement::run_toward_input)return live_flags;
-    return static_cast<std::uint8_t>(live_flags|kModernRunTowardInputFlag);
+    if(!modern_sample)return live_flags;
+    std::uint8_t recorded=live_flags;
+    if(player1.ground_movement==ModernGroundMovement::run_toward_input)recorded|=kModernRunTowardInputFlag;
+    if(player1.mouse_original_acceleration)recorded|=kModernOriginalAccelerationFlag;
+    return recorded;
 }
 inline std::uint8_t modern_scope_flags(std::uint32_t held) {
     return static_cast<std::uint8_t>(kModernActionsFlag |
