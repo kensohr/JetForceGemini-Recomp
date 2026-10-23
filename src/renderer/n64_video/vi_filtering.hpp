@@ -1,4 +1,5 @@
 #pragma once
+#include "video_options.hpp"
 #include <cstdint>
 
 namespace n64_video {
@@ -19,8 +20,8 @@ enum class Resampling : std::uint32_t {
     replicate = 1,
 };
 
-// What the VI does to a 16-bit framebuffer on its way to the TV, besides
-// gamma: the dither filter, then horizontal resampling to the scanline.
+// What the VI does to a framebuffer on its way to the TV, besides gamma: the
+// dither filter, then horizontal resampling to the scanline.
 struct ViFiltering {
     // Nudge each pixel toward its 3x3 neighbourhood to smooth dither grain.
     bool dither_filter = false;
@@ -33,6 +34,12 @@ struct ViFiltering {
     std::uint32_t x_offset = 0;
 };
 
+// VI_CONTROL (VI_STATUS) bits 1:0 hold the framebuffer colour type: 0 blank,
+// 1 reserved, 2 16-bit, 3 32-bit.
+inline constexpr std::uint32_t vi_control_type_mask = 0x3U;
+inline constexpr std::uint32_t vi_control_type_16_bit = 0x2U;
+inline constexpr std::uint32_t vi_control_type_32_bit = 0x3U;
+
 inline constexpr std::uint32_t vi_control_aa_mode_shift = 8;
 inline constexpr std::uint32_t vi_control_aa_mode_mask = 0x3U;
 // AA mode 3: no anti-aliasing and no resampling interpolation.
@@ -43,6 +50,16 @@ inline constexpr std::uint32_t vi_h_start_field_mask = 0x3FFU;
 inline constexpr std::uint32_t vi_h_start_start_shift = 16;
 inline constexpr std::uint32_t vi_x_scale_field_mask = 0xFFFU;
 inline constexpr std::uint32_t vi_x_scale_offset_shift = 16;
+
+// Original video output runs the VI filtering whenever the VI scans out a
+// 16- or 32-bit framebuffer. A blank or reserved colour type shows nothing.
+inline bool vi_filtering_enabled(const VideoOptions &options,
+                                 std::uint32_t vi_control) {
+    const std::uint32_t type = vi_control & vi_control_type_mask;
+    const bool shows_framebuffer =
+        (type == vi_control_type_16_bit) || (type == vi_control_type_32_bit);
+    return options.original_video_output && shows_framebuffer;
+}
 
 inline ViFiltering vi_filtering(const ViRegisters &registers) {
     const std::uint32_t aa_mode =

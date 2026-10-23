@@ -13,7 +13,8 @@ struct VideoOptions {
 
 // The options in effect for the running renderer. apply_to_rt64 sets them;
 // the patched RT64 VI pass reads them on its presentation thread, which RT64
-// starts after setup, so no further synchronisation is needed.
+// starts after setup, so no further synchronisation is needed. Set them only
+// before RT64::Application::setup: a later change races with that thread.
 inline VideoOptions &active_options() {
     static VideoOptions options;
     return options;

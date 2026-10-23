@@ -22,6 +22,8 @@ struct Rt64UserConfiguration {
 } // namespace
 
 int main() {
+  // apply_to_rt64 sets the process-wide active options; put them back after.
+  const n64_video::VideoOptions options_before = n64_video::active_options();
   unsigned failures = 0;
   auto check = [&](bool ok, const char *name) {
     if (!ok) {
@@ -65,6 +67,30 @@ int main() {
         "original leaves a blank VI unreduced");
   check(!n64_video::colour_reduction(enhanced_options, vi_control_16_bit).enabled,
         "enhanced never reduces");
+
+  // The RDP rounds a channel up to the next 5-bit step only when its low 3
+  // bits exceed the dither value (angrylion's rgb_dither), so dither value 0
+  // rounds most and 7 never rounds. Worked examples: 13 has low bits 5.
+  check(n64_video::rdp_dither_channel(13, 4) == 2, "13 with dither 4 rounds up to 2");
+  check(n64_video::rdp_dither_channel(13, 5) == 1, "13 with dither 5 stays at 1");
+  check(n64_video::rdp_dither_channel(7, 7) == 0, "dither 7 never rounds up");
+  check(n64_video::rdp_dither_channel(1, 0) == 1, "dither 0 rounds up any low bits");
+  check(n64_video::rdp_dither_channel(8, 0) == 1, "a channel on a 5-bit step stays");
+  check(n64_video::rdp_dither_channel(250, 0) == 31 &&
+            n64_video::rdp_dither_channel(255, 0) == 31,
+        "rounding up clamps at 31");
+
+  check(n64_video::vi_filtering_enabled(original_options, vi_control_16_bit),
+        "original filters a 16-bit framebuffer");
+  check(n64_video::vi_filtering_enabled(original_options, vi_control_32_bit),
+        "original filters a 32-bit framebuffer");
+  check(!n64_video::vi_filtering_enabled(original_options, vi_control_blank),
+        "original doesn't filter a blank VI");
+  constexpr std::uint32_t vi_control_reserved_type = 0x13015U;
+  check(!n64_video::vi_filtering_enabled(original_options, vi_control_reserved_type),
+        "original doesn't filter the reserved colour type");
+  check(!n64_video::vi_filtering_enabled(enhanced_options, vi_control_16_bit),
+        "enhanced never filters");
 
   // VI registers as libultra's NTSC low-res mode sets them: active scanline
   // from 108 to 748 (640 samples), X scale 0x200 (half a framebuffer pixel
@@ -119,6 +145,7 @@ int main() {
   check(!n64_video::active_options().original_video_output,
         "applying enhanced makes it active for the VI pass");
 
+  n64_video::active_options() = options_before;
   std::cout << "N64 video core checks: " << failures << " failures\n";
   return failures ? 1 : 0;
 }

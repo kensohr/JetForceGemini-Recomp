@@ -1,5 +1,6 @@
 #pragma once
 #include "video_options.hpp"
+#include "vi_filtering.hpp"
 #include <cstdint>
 
 namespace n64_video {
@@ -19,13 +20,26 @@ struct ColourReduction {
     DitherPattern pattern = DitherPattern::magic_square;
 };
 
-// VI_CONTROL (VI_STATUS) bits 1:0 hold the framebuffer colour type.
-inline constexpr std::uint32_t vi_control_type_mask = 0x3U;
-inline constexpr std::uint32_t vi_control_type_16_bit = 0x2U;
+inline constexpr std::uint32_t rdp_channel_low_bits_mask = 0x7U;
+inline constexpr std::uint32_t rdp_channel_5_bit_shift = 3;
+inline constexpr std::uint32_t rdp_channel_5_bit_max = 31;
+
+// The RDP's dithered 16-bit write of one 8-bit channel: it rounds the channel
+// up to the next 5-bit step when its low 3 bits exceed the pattern value
+// (0-7), clamped at 31, else keeps the top 5 bits. This is the reference the
+// VI pre-pass shader's ReduceToRGB5 implements.
+constexpr std::uint32_t rdp_dither_channel(std::uint32_t channel8,
+                                           std::uint32_t dither) {
+    const bool rounds_up = (channel8 & rdp_channel_low_bits_mask) > dither;
+    const std::uint32_t channel5 = channel8 >> rdp_channel_5_bit_shift;
+    if (!rounds_up)
+        return channel5;
+    return (channel5 < rdp_channel_5_bit_max) ? channel5 + 1 : rdp_channel_5_bit_max;
+}
 
 // Original video output reduces a 16-bit framebuffer the way the RDP writes
-// one: each 8-bit channel plus the pattern value (0-7), clamped, top 5 bits.
-// A 32-bit or blank framebuffer is shown as rendered.
+// one (rdp_dither_channel). A 32-bit framebuffer keeps its 8-bit channels; a
+// blank one shows nothing.
 //
 // The pattern is fixed: dithering once per presented frame approximates the
 // RDP dithering every blend with the pattern each draw selects. Magic square

@@ -13,18 +13,19 @@ rendering settings, a change applies on the next game launch.
   game.
 - **16-bit colour with dither.** When the game's `VI_CONTROL` selects a
   16-bit framebuffer, each presented frame is reduced to RGBA5551 the way the
-  RDP writes one: the dither value (0-7) is added to each 8-bit channel, the
-  result is clamped and the top 5 bits are kept. This brings back the
-  console's colour banding and dither grain. A 32-bit framebuffer is shown as
-  rendered.
+  RDP writes one: an 8-bit channel rounds up to the next 5-bit step when its
+  low 3 bits exceed the dither value (0-7), clamped at 31, and otherwise
+  keeps its top 5 bits. This brings back the console's colour banding and
+  dither grain. A 32-bit framebuffer keeps its 8-bit colour; the dither
+  filter and resampling below still apply to it.
   - Pattern: magic square, the libultra default. Jet Force Gemini's draw
     modes select it (`G_CD_MAGICSQ` in its other-mode setup); its copy-mode
     draws disable dithering, which the RDP does for copy mode anyway.
 - **Dither filter.** When the game sets the dither-filter bit in
-  `VI_CONTROL`, each 16-bit pixel is compared with its 3x3 neighbourhood:
-  per channel, it moves one step (of 255) toward each of the 8 neighbours
-  whose 5-bit value differs from its own. This smooths the dither grain and
-  restores some of the low bits the 16-bit framebuffer dropped. With the bit
+  `VI_CONTROL`, each pixel is compared with its 3x3 neighbourhood: per
+  channel, it moves one step (of 255) toward each of the 8 neighbours whose
+  top 5 bits differ from its own. On a 16-bit framebuffer this smooths the
+  dither grain and restores some of the low bits it dropped. With the bit
   clear the grain shows unfiltered.
 - **Horizontal resampling.** Each framebuffer row is resampled to the active
   scanline width (`hEnd - hStart` from `VI_H_START`, 640 samples in a normal
@@ -65,8 +66,6 @@ treatment.
   VI's `VI_Y_SCALE` interpolation and interlacing aren't emulated.
 - **No gamma dither.** The VI's random low-bit noise (`VI_CONTROL` gamma
   dither) isn't added.
-- **16-bit framebuffers only.** A 32-bit framebuffer is shown as rendered,
-  without the dither filter or resampling.
 - Pixels outside the framebuffer repeat its edge pixel; the console reads
   whatever memory lies next to it.
 
