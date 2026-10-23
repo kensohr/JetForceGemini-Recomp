@@ -2429,6 +2429,13 @@ void request_pc_rumble(State& state,std::uint32_t target,const recomp_context& c
 bool modern_controls_selected(const State &state,std::size_t port) {
   return port<4U && state.modern_controls_active && state.modern_controls[port].enabled && state.rdram;
 }
+// The player's Ground movement setting decides which movement states the
+// shoulder adapter locks to the view direction. An unknown port keeps the
+// view-locked behaviour.
+bool modern_view_locked(const State& state,std::size_t port,unsigned movement,bool air_aim) {
+  if(port>=4U)return true;
+  return jfg::modern_view_locked_movement(state.modern_controls[port].ground_movement,movement,air_aim);
+}
 unsigned modern_actor_port(const State& state,std::uint32_t actor) {
   jfg::mod::Memory ram({state.rdram,kRdramSize});
   if(!ram.valid(actor,0xA4U))return 4U;
@@ -2576,9 +2583,35 @@ public:
   }
 };
 class ModernShoulderScope {
+  static constexpr std::uint32_t kStickX=0x800F6DACU,kStickY=0x800F6DB0U;
   State &state_;
   std::uint32_t actor_=0,control_=0,update_ticks_=0;
   std::size_t port_=0;
+  std::uint32_t native_stick_x_=0,native_stick_y_=0,steered_x_=0,steered_y_=0;
+  bool steered_=false;
+  // Camera-relative running: the unchanged native handler interprets the
+  // guest stick relative to the native camera yaw, which can lag the view
+  // direction. Present the stick rotated into the view for this update only.
+  void steer_toward_input(jfg::mod::Memory& ram,std::uint32_t actor,
+                          const jfg::PcShoulder& view,int native_camera_yaw) {
+    native_stick_x_=ram.u32(kStickX);native_stick_y_=ram.u32(kStickY);
+    const jfg::PcStickAxes input{static_cast<std::int32_t>(native_stick_x_),
+                                 static_cast<std::int32_t>(native_stick_y_)};
+    const auto steered=jfg::pc_camera_relative_stick(input,view.yaw,native_camera_yaw);
+    steered_x_=static_cast<std::uint32_t>(steered.x);steered_y_=static_cast<std::uint32_t>(steered.y);
+    hle::GuestMemory memory({state_.rdram,kRdramSize},hle::GuestMemory::Layout::native_word_big_endian);
+    steered_=memory.write_u32(kStickX,steered_x_) && memory.write_u32(kStickY,steered_y_);
+    state_.gameplay_trace.event("pc-run-toward-input",{state_.vi_retraces,actor,
+      static_cast<std::uint16_t>(view.yaw),static_cast<std::uint16_t>(native_camera_yaw),
+      native_stick_x_,native_stick_y_,steered_x_,steered_y_});
+  }
+  // Later consumers of the guest stick this frame see the original axes.
+  void restore_stick(jfg::mod::Memory& ram) {
+    if(!steered_ || ram.u32(kStickX)!=steered_x_ || ram.u32(kStickY)!=steered_y_)return;
+    hle::GuestMemory memory({state_.rdram,kRdramSize},hle::GuestMemory::Layout::native_word_big_endian);
+    (void)memory.write_u32(kStickX,native_stick_x_);
+    (void)memory.write_u32(kStickY,native_stick_y_);
+  }
 public:
   ModernShoulderScope(State &state,std::uint32_t target,const recomp_context &context):state_(state) {
     if(target!=0x80032A48U)return;
@@ -2653,21 +2686,26 @@ public:
         static_cast<std::uint16_t>(view.pitch),ram.u32(0x800F6DBCU)});
       return; // Camera only: no facing, velocity, action or recovery-timer writes.
     }
+    const bool view_locked=modern_view_locked(state,port,movement,view.air_aim);
     // The original airborne handler owns momentum heading and air steering.
     // Body/view orientation is restored after physics consumes that heading.
-    if(movement==3U)ram.put16(actor,ram.u16(control+0x11CU));
-    else {
+    if(movement==3U) {
+      if(view_locked)ram.put16(actor,ram.u16(control+0x11CU));
+    } else if(view_locked) {
       view.movement_before_update=jfg::pc_velocity_in_view(view.movement_before_update,
         view.movement_before_yaw,view.yaw);
       view.movement_before_yaw=view.yaw;
       ram.put16(actor,static_cast<std::uint16_t>(view.yaw));
       ram.put16(control+0x11CU,static_cast<std::uint16_t>(view.yaw));
       ram.put16(control+0x10AU,0);
+    } else if(ram.valid(camera,0x4CU)) {
+      steer_toward_input(ram,actor,view,ram.s16(camera));
     }
   }
   ~ModernShoulderScope() {
     if(!actor_)return;
     jfg::mod::Memory ram({state_.rdram,kRdramSize});
+    restore_stick(ram);
     const auto &view=state_.pc_shoulders[port_];
     const auto camera=ram.u32(0x800F6DC0U);
     state_.gameplay_trace.event("pc-shoulder",{state_.vi_retraces,actor_,
@@ -2711,6 +2749,10 @@ void modern_shoulder_physics(State &state,std::uint32_t target,const recomp_cont
   }
   view.aiming=aiming;
   if(movement==3U) {
+    // Camera-relative running takes off with the native heading and speed.
+    if(view.movement_before_state!=3U &&
+       !modern_view_locked(state,port,view.movement_before_state,view.air_aim))
+      view.movement_before_state=3U;
     if(view.movement_before_state!=3U) {
       const auto momentum=jfg::pc_native_airborne_motion(view.movement_before_update,
         view.movement_before_yaw,ram.u8(control+0x569U)!=0);
@@ -2725,6 +2767,9 @@ void modern_shoulder_physics(State &state,std::uint32_t target,const recomp_cont
     modern_air_aim_update(state,actor,control,context);
     return;
   }
+  // Camera-relative running: the native handler owns heading, turn bank,
+  // velocity and direction flag. Aim and crouch entry still snap below.
+  if(!modern_view_locked(state,port,movement,view.air_aim))return;
   ram.put16(actor,static_cast<std::uint16_t>(view.yaw));
   ram.put16(control+0x11CU,static_cast<std::uint16_t>(view.yaw));
   ram.put16(control+0x10AU,0);
@@ -2765,7 +2810,8 @@ public:
     const auto port=jfg::mod::pc_input_port(ram,ram.u8(control));
     if(modern_shoulder_current(state,port,actor) &&
        state.pc_shoulders[port].movement_before_state!=4U &&
-       (!state.pc_shoulders[port].water_origin || modern_air_aim_active(state,actor,control))) {
+       (!state.pc_shoulders[port].water_origin || modern_air_aim_active(state,actor,control)) &&
+       modern_view_locked(state,port,3U,state.pc_shoulders[port].air_aim)) {
       actor_=actor;port_=port;
     }
   }
@@ -2823,7 +2869,10 @@ public:
     const auto requested=static_cast<std::uint32_t>(context.r6);
     const unsigned character=ram.u8(control+1U)&3U;
     const auto family=modern_animation_family(state,character,requested);
-    if(ram.u8(control+0x568U)==0U)
+    // Camera-relative running turns the body into motion, so the native
+    // clip selection is already correct there.
+    const auto port=jfg::mod::pc_input_port(ram,ram.u8(control));
+    if(ram.u8(control+0x568U)==0U && modern_view_locked(state,port,0U,false))
       context.r6=jfg::pc_ground_animation(character,requested,family,
         {std::bit_cast<float>(ram.u32(control+0x10U)),std::bit_cast<float>(ram.u32(control+4U))});
     state.gameplay_trace.event("pc-locomotion",{state.vi_retraces,actor,ram.u8(control+0x568U),

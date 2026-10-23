@@ -300,6 +300,29 @@ inline PcMoveVelocity pc_shoulder_movement(int x,int y) {
   if(length>65.0F){sx*=65.0F/length;sy*=65.0F/length;}
   return {sx/16.0F,-sy/16.0F};
 }
+// Native post-deadzone stick axes (guest 0x800F6DAC/0x800F6DB0).
+struct PcStickAxes { int x=0,y=0; };
+// The native ground handler turns stick input into a travel direction
+// relative to the native camera yaw. Under camera-relative running the
+// travel must instead be relative to the view direction, which the native
+// camera can lag. Rotate the axes by that difference so the native handler,
+// unchanged, runs toward the input as seen from the view.
+inline PcStickAxes pc_camera_relative_stick(PcStickAxes input,int view_yaw,int native_camera_yaw) {
+  const int difference=pc_wrap_angle(pc_shoulder_camera_yaw(view_yaw)-native_camera_yaw);
+  if(difference==0)return input;
+  const double angle=static_cast<double>(difference)*6.283185307179586/65536.0;
+  const double sine=std::sin(angle),cosine=std::cos(angle);
+  const double x=input.x,y=input.y;
+  PcStickAxes rotated{static_cast<int>(std::lround(x*cosine+y*sine)),
+                      static_cast<int>(std::lround(y*cosine-x*sine))};
+  // Rounding must not push the axes past the native radial speed cap.
+  const double limit=std::hypot(x,y);
+  while(std::hypot(static_cast<double>(rotated.x),static_cast<double>(rotated.y))>limit) {
+    auto& larger=std::abs(rotated.x)>=std::abs(rotated.y)?rotated.x:rotated.y;
+    larger-=larger>0?1:-1;
+  }
+  return rotated;
+}
 // The native selector assumes the body turns into motion. Modern ground
 // movement can reverse locally without that turn. Correct only locomotion
 // requests; the caller resolves weapon variants through the native clip table.

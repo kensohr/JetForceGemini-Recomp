@@ -41,6 +41,16 @@ enum class ModernGlyphStyle { automatic=0, xbox=1, playstation=2 };
 // Non-aiming ground locomotion. Run toward input is the original game's
 // camera-relative running; face the camera is view-locked strafing.
 enum class ModernGroundMovement { run_toward_input=0, face_camera=1 };
+// Whether the Modern shoulder adapter locks the body to the view direction
+// in this native movement state (0 normal ground, 2 crouch, 3 airborne,
+// 10/11 aim). Run toward input leaves normal ground movement and airborne
+// body yaw to the native handler; aim and crouch stay view-locked.
+inline bool modern_view_locked_movement(ModernGroundMovement ground,unsigned movement_state,bool air_aim) {
+    if(ground==ModernGroundMovement::face_camera)return true;
+    if(movement_state==0U)return false;
+    if(movement_state==3U)return air_aim;
+    return true;
+}
 struct ModernControlsConfig {
     bool enabled = false;
     bool aim_toggle = false;
