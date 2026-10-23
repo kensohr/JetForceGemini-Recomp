@@ -14,6 +14,7 @@
 - [Experimental PC controls](features/pc-controls.md): mouse/keyboard and dual-stick play.
 - [Live map and navigation mod](features/navigation-mod.md): map views, exports and automatic navigation.
 - [Unified frontend and live inventory](features/frontend.md): launcher architecture and ROM-derived artwork.
+- [Original video output](features/original-video-output.md): native resolution and the console's dithered 16-bit colour.
 
 ## Develop
 
