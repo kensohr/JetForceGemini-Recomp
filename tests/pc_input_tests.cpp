@@ -61,6 +61,74 @@ void check_camera_relative_stick() {
   check(jfg::pc_camera_relative_stick({0,0},0,16384).x==0 &&
         jfg::pc_camera_relative_stick({0,0},0,16384).y==0,"a released stick stays released");
 }
+// Camera yaw 0 puts the camera south (-z) of its focus, looking north.
+void check_leash_camera() {
+  {
+    // First owned update (room entry, leaving aim or a special state): the
+    // camera starts from the view direction it already has.
+    const jfg::PcLeashCamera leash;
+    check(leash.follow_yaw({500,0,500},1234)==1234,"an unseeded leash keeps the view direction");
+  }
+  {
+    // Camera 200 south of the focus. The character runs 200 east: the camera
+    // now lies south-west of it, so the leash swings it round by 45 degrees.
+    jfg::PcLeashCamera leash;
+    leash.resolved({0,0,0},{0,0,-200},0);
+    check(leash.follow_yaw({200,0,0},0)==-8192,"running sideways swings the camera around");
+    // Look input this update (+1000) orbits on top of the leash.
+    check(leash.follow_yaw({200,0,0},1000)==-7192,"look input orbits the dragged camera");
+    // Wrapping: last yaw near +180 degrees, look crosses the seam.
+    jfg::PcLeashCamera north;
+    north.resolved({0,0,0},{0,0,200},-32768);
+    check(north.follow_yaw({0,0,-100},32000)==32000,"look input wraps across the half-turn seam");
+  }
+  {
+    // Standing still with idle look: about 10 s of updates far from the
+    // origin, each resolving the camera on its unobstructed boom.
+    const jfg::PcOrbitPoint focus{-4321.5F,812.25F,6789.75F};
+    jfg::PcLeashCamera leash;
+    int yaw=leash.follow_yaw(focus,-12345);
+    bool held=true;
+    for(int update=0;update<600;++update) {
+      const auto boom=jfg::pc_orbit_point(yaw,2000,jfg::kPcShoulderDistance);
+      leash.resolved(focus,{focus.x+boom.x,focus.y+boom.y,focus.z+boom.z},yaw);
+      yaw=leash.follow_yaw(focus,yaw);
+      held=held && yaw==-12345;
+    }
+    check(held,"an idle camera holds its yaw while the character stands still");
+    // Scenery nudged the camera sideways off its yaw. Standing still must
+    // not let that offset turn the camera on its own.
+    jfg::PcLeashCamera nudged;
+    nudged.resolved({0,0,0},{30,0,-150},0);
+    check(nudged.follow_yaw({0,0,0},0)==0,"a collision offset does not turn a standing camera");
+    check(nudged.follow_yaw({0,0,0},500)==500,"look input still orbits a standing camera");
+  }
+  {
+    jfg::PcLeashCamera leash;
+    leash.resolved({0,0,0},{0,0,-200},0);
+    check(leash.follow_yaw({0,0,40},0)==0,"running away from the camera trails it at the same yaw");
+    check(leash.follow_yaw({0,0,-150},0)==0,
+      "running toward the camera backs it away along its bearing without swinging around");
+    // Collision pulled the camera in to 50 units. The next bearing comes
+    // from that resolved position; the caller extends the boom along it.
+    jfg::PcLeashCamera pulled;
+    pulled.resolved({0,0,0},{0,0,-50},0);
+    check(pulled.follow_yaw({30,0,0},0)==-5637,"the bearing comes from the collision-resolved position");
+    // The character ends up right under the camera: there is no bearing.
+    jfg::PcLeashCamera overhead;
+    overhead.resolved({0,0,0},{10,150,0},5000);
+    check(overhead.follow_yaw({10,0,0},5000)==5000,"a camera straight overhead keeps the view direction");
+  }
+  {
+    // A new player or room (respawn, area entry) seeds the leash afresh.
+    jfg::PcShoulder view;
+    view.acquire(0x80100000U,0x80200000U,0,0);
+    view.leash.resolved({0,0,0},{0,0,-200},0);
+    view.leash_camera=true;
+    view.acquire(0x80100400U,0x80200000U,0,0);
+    check(!view.leash.following && !view.leash_camera,"a new player starts an unseeded leash");
+  }
+}
 
 void check_swimming_camera_collision() {
   // The captured regression has a valid far endpoint above the water while
@@ -217,6 +285,7 @@ void check_boss_aim() {
 }
 }
 int main() {
+  check_leash_camera();
   check_boss_aim();
   check_swimming_camera_collision();
   jfg::PcInputConfig config,roundtrip;

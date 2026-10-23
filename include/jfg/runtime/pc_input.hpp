@@ -496,6 +496,38 @@ struct PcCameraBoom {
     return at(selected);
   }
 };
+// The camera under camera-relative running. Like the native follow camera
+// (0x8002CF6C default path) it is dragged by the character: each update its
+// yaw is the bearing from the focus to where the camera was last resolved,
+// plus look input. None of the native easings apply. Yaws use the camera
+// convention (cam+0, pc_orbit_point).
+struct PcLeashCamera {
+  bool following=false;
+  PcOrbitPoint focus{},camera{};
+  int yaw=0;
+  // view_camera_yaw is the view direction this update: the last camera yaw
+  // plus this update's look input.
+  int follow_yaw(PcOrbitPoint next_focus,int view_camera_yaw) const {
+    if(!following)return view_camera_yaw;
+    // Only the character's travel drags the camera. Scenery can leave the
+    // resolved position slightly off its yaw; re-reading that bearing while
+    // standing still would turn the camera on its own.
+    constexpr float kStillTravel=0.01F;
+    const float travel=std::hypot(next_focus.x-focus.x,next_focus.z-focus.z);
+    if(!(travel>=kStillTravel))return view_camera_yaw;
+    const float dx=camera.x-next_focus.x,dz=camera.z-next_focus.z;
+    // A camera (almost) straight overhead has no meaningful bearing.
+    constexpr float kMinimumReach=1.0F;
+    if(!(std::hypot(dx,dz)>=kMinimumReach))return view_camera_yaw;
+    constexpr float units_per_radian=65536.0F/6.283185307179586F;
+    const int bearing=static_cast<int>(std::lround(std::atan2(dx,-dz)*units_per_radian));
+    const int look=pc_wrap_angle(view_camera_yaw-yaw);
+    return pc_wrap_angle(bearing+look);
+  }
+  void resolved(PcOrbitPoint resolved_focus,PcOrbitPoint resolved_camera,int resolved_yaw) {
+    following=true;focus=resolved_focus;camera=resolved_camera;yaw=resolved_yaw;
+  }
+};
 struct PcShoulder {
   PcCameraBoom camera_boom{};
   PcMoveVelocity movement_before_update{};
@@ -503,6 +535,9 @@ struct PcShoulder {
   int movement_before_yaw=0;
   bool active=false,aiming=false,air_aim=false,landing_recovery=false;
   bool water_origin=false;
+  // This update's normal camera is the leash camera (camera-relative running).
+  bool leash_camera=false;
+  PcLeashCamera leash{};
   std::uint32_t actor=0,control=0;
   std::uint64_t retrace=0;
   int yaw=0,pitch=0;
