@@ -791,6 +791,12 @@ target_compile_features(jfg_video_settings_tests PRIVATE cxx_std_20)
 jfg_set_project_warnings(jfg_video_settings_tests)
 add_test(NAME jfg.video_settings COMMAND jfg_video_settings_tests)
 
+add_executable(jfg_n64_video_tests n64_video_tests.cpp)
+target_include_directories(jfg_n64_video_tests PRIVATE "${PROJECT_SOURCE_DIR}/src/renderer")
+target_compile_features(jfg_n64_video_tests PRIVATE cxx_std_20)
+jfg_set_project_warnings(jfg_n64_video_tests)
+add_test(NAME jfg.n64_video COMMAND jfg_n64_video_tests)
+
 if(WIN32)
     add_executable(jfg_video_dialog_tests video_dialog_tests.cpp ../src/app/video_settings_dialog.cpp ../launcher/native/video_settings.rc)
     target_compile_features(jfg_video_dialog_tests PRIVATE cxx_std_20)

@@ -49,6 +49,9 @@ bool apply(HWND window, VideoDialogModel &model) {
       static_cast<unsigned>(selection(window, IDC_VIDEO_WINDOW_SIZE));
   candidate.pause_inactive =
       IsDlgButtonChecked(window, IDC_VIDEO_PAUSE) == BST_CHECKED;
+  candidate.rendering.output = selection(window, IDC_VIDEO_OUTPUT) == 1
+                                   ? VideoOutput::original
+                                   : VideoOutput::enhanced;
   candidate.rendering.vsync =
       IsDlgButtonChecked(window, IDC_VIDEO_VSYNC) == BST_CHECKED;
   const int mode = selection(window, IDC_VIDEO_FRAME_MODE);
@@ -95,12 +98,16 @@ INT_PTR CALLBACK procedure(HWND window, UINT message, WPARAM wparam,
             {L"Windowed", L"Borderless fullscreen"});
     choices(window, IDC_VIDEO_WINDOW_SIZE,
             {L"Keep current size", L"1280 x 720", L"1920 x 1080"});
+    choices(window, IDC_VIDEO_OUTPUT, {L"Enhanced", L"Original"});
     choices(window, IDC_VIDEO_FRAME_MODE,
             {L"Original", L"Custom", L"Unlimited"});
     selection(window, IDC_VIDEO_WINDOW_MODE,
               model->settings.fullscreen ? 1 : 0);
     selection(window, IDC_VIDEO_WINDOW_SIZE,
               static_cast<int>(model->settings.window_size));
+    selection(window, IDC_VIDEO_OUTPUT,
+              model->settings.rendering.output == VideoOutput::original ? 1
+                                                                        : 0);
     selection(window, IDC_VIDEO_FRAME_MODE,
               model->settings.rendering.mode == FrameRateMode::custom      ? 1
               : model->settings.rendering.mode == FrameRateMode::unlimited ? 2

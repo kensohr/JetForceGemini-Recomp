@@ -698,7 +698,8 @@ LRESULT CALLBACK procedure(HWND window, UINT message, WPARAM wparam,
     const auto request=*static_cast<const jfg::frontend::VideoRequest*>(packet->lpData);
     if(!jfg::frontend::valid_video_request(request))return 0;
     jfg::frontend::VideoDialogSettings settings;
-    settings.rendering={static_cast<jfg::FrameRateMode>(request.mode),request.fps,request.vsync!=0,static_cast<jfg::BlurMode>(request.blur),request.fog_percent};
+    settings.rendering={static_cast<jfg::FrameRateMode>(request.mode),request.fps,request.vsync!=0,static_cast<jfg::BlurMode>(request.blur),request.fog_percent,
+      static_cast<jfg::VideoOutput>(request.video_output)};
     settings.fullscreen=request.fullscreen!=0;settings.window_size=request.window_size;settings.pause_inactive=request.pause_inactive!=0;
     std::wstring error;return applyVideo(settings,error)?1:0;
   }

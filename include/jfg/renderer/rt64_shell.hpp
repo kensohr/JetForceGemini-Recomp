@@ -1,6 +1,7 @@
 #pragma once
 
 #include "jfg/renderer/daynight_fog.hpp"
+#include "jfg/renderer/video_settings.hpp"
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -76,6 +77,7 @@ struct Rt64ShellConfiguration {
     unsigned experimental_refresh_rate = 0U;
     bool unlimited_presentation = false;
     bool vsync = true;
+    VideoOutput video_output = VideoOutput::enhanced;
 };
 
 struct Rt64RdramRange {
