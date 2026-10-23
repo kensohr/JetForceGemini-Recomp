@@ -400,6 +400,110 @@ void test_replay_modern_controls_old_formats_stay_off() {
     }
 }
 
+std::string serialize_v9(const std::vector<jfg::InputReplayEvent>& events) {
+    std::ostringstream serialized;serialized<<jfg::kInputReplayHeaderV9<<'\n';
+    for(const auto &event:events) {
+        const auto &sample=event.sample;
+        serialized<<event.first_retrace<<','<<event.end_retrace<<','<<int(sample.connected)<<','
+            <<std::hex<<sample.buttons<<std::dec<<','<<int(sample.stick_x)<<','<<int(sample.stick_y)<<','
+            <<int(sample.pc_mode)<<','<<sample.look_x<<','<<sample.look_y<<','<<int(sample.modern_flags)<<','
+            <<int(sample.menu_kind)<<','<<int(sample.menu_target)<<'\n';
+    }
+    return serialized.str();
+}
+
+void test_ground_movement_recording() {
+    // 0xA0: Modern actions with Run toward input; 0x80: Face the camera.
+    const TemporaryReplay valid("jfg-phase8-input-v9\n"
+        "1,2,1,0,0,80,3,4,0,160,0,0\n"
+        "2,3,1,0,0,80,5,0,0,128,0,0\n"
+        "3,4,1,0,-80,0,3,0,0,175,0,0\n"
+        "4,5,1,0,0,0,0,0,0,0,0,0\n");
+    jfg::DeterministicInputReplay replay;
+    check(jfg::DeterministicInputReplay::load(valid.path(),replay)==jfg::InputReplayError::none,
+        "v9 recordings carry the Ground movement bit");
+    check(replay.sample_by_poll(0).modern_flags==(jfg::kModernActionsFlag|jfg::kModernRunTowardInputFlag) &&
+        replay.sample_by_poll(1).modern_flags==jfg::kModernActionsFlag,"v9 keeps the bit both set and clear");
+    check((replay.sample_by_poll(2).modern_flags&7U)==7U &&
+        jfg::modern_roll_side_buttons(replay.sample_by_poll(2).modern_flags)==2 &&
+        (replay.sample_by_poll(2).modern_flags&jfg::kModernRunTowardInputFlag)!=0,
+        "the Ground movement bit coexists with scope and roll flags");
+    const auto before=replay.events();
+    const TemporaryReplay roundtrip(serialize_v9(before));
+    check(jfg::DeterministicInputReplay::load(roundtrip.path(),replay)==jfg::InputReplayError::none &&
+        replay.events()==before,"v9 serialization roundtrips the Ground movement bit");
+    for(const auto *row:{"1,2,1,0,0,0,3,0,0,32,0,0","1,2,0,0,0,0,0,0,0,160,0,0",
+        "1,2,1,0,0,0,3,0,0,224,0,0"}) {
+        const TemporaryReplay bad(std::string("jfg-phase8-input-v9\n")+row+"\n");
+        check(jfg::DeterministicInputReplay::load(bad.path(),replay)==jfg::InputReplayError::invalid_record &&
+            replay.events()==before,"v9 Ground movement needs Modern identity, a connection and known bits");
+    }
+    for(const auto *old:{"jfg-phase8-input-v5\n1,2,1,0,0,0,3,0,0,160\n",
+        "jfg-phase8-input-v6\n1,2,1,0,0,0,3,0,0,160,0,0\n","jfg-phase8-input-v7\n1,2,1,0,0,0,3,0,0,160,0,0\n",
+        "jfg-phase8-input-v8\n1,2,1,0,0,0,3,0,0,160,0,0\n"}) {
+        const TemporaryReplay bad(old);
+        check(jfg::DeterministicInputReplay::load(bad.path(),replay)==jfg::InputReplayError::invalid_record,
+            "v5-v8 recordings cannot carry the Ground movement bit");
+    }
+    const TemporaryReplay fallback("jfg-phase8-input-v8\n1,2,1,0,0,80,3,0,0,128,0,0\n");
+    check(jfg::DeterministicInputReplay::load(fallback.path(),replay)==jfg::InputReplayError::none &&
+        replay.sample_at(1).modern_flags==jfg::kModernActionsFlag,"v8 Modern recordings still load unchanged");
+}
+
+std::string replay_ground_trace(const jfg::DeterministicInputReplay& replay) {
+    jfg::ReplayModernControls modern;
+    std::string trace;
+    for(std::uint64_t poll=0;poll<replay.events().size();++poll) {
+        (void)modern.observe(replay.sample_by_poll(poll));
+        trace+=modern.ground_movement()==jfg::ModernGroundMovement::run_toward_input?'R':'F';
+    }
+    return trace;
+}
+
+void test_replay_ground_movement_follows_recording() {
+    // Release-wait (flag 0), disconnected and Controller Mapping samples carry
+    // no Ground movement value, so the last Modern sample's value holds.
+    const TemporaryReplay recording("jfg-phase8-input-v9\n"
+        "1,2,1,0,0,80,3,0,0,160,0,0\n"
+        "2,3,1,0,0,0,0,0,0,0,0,0\n"
+        "3,4,0,0,0,0,0,0,0,0,0,0\n"
+        "4,5,1,0,0,80,5,0,0,128,0,0\n"
+        "5,6,1,8000,0,0,0,0,0,0,0,0\n"
+        "6,7,1,0,0,80,3,0,0,161,0,0\n");
+    jfg::DeterministicInputReplay replay;
+    check(jfg::DeterministicInputReplay::load(recording.path(),replay,jfg::InputReplayOrder::recorded_poll)==
+        jfg::InputReplayError::none,"v9 Ground movement recording loads");
+    check(jfg::ReplayModernControls{}.ground_movement()==jfg::ModernGroundMovement::face_camera,
+        "replayed Ground movement starts as Face the camera");
+    check(replay_ground_trace(replay)=="RRRFFR",
+        "replayed Ground movement follows the recorded bit and holds across samples without Modern identity");
+
+    const TemporaryReplay older("jfg-phase8-input-v8\n"
+        "1,2,1,0,0,80,3,0,0,128,0,0\n"
+        "2,3,1,0,-80,0,5,0,0,143,0,0\n");
+    check(jfg::DeterministicInputReplay::load(older.path(),replay,jfg::InputReplayOrder::recorded_poll)==
+        jfg::InputReplayError::none,"v8 Modern recording loads");
+    check(replay_ground_trace(replay)=="FF","v8 Modern recordings replay as Face the camera");
+}
+
+void test_recorded_ground_movement_replays_as_recorded() {
+    using jfg::ModernGroundMovement;
+    for(const auto recorded:{ModernGroundMovement::run_toward_input,ModernGroundMovement::face_camera}) {
+        // A recorder poll with scope cycle held, then one waiting for device release.
+        std::vector<jfg::InputReplayEvent> events(2);
+        events[0]={1,2,{true,0,0,80,3,0,0,jfg::modern_recorded_flags(0x81U,recorded)}};
+        events[1]={2,3,{true,0,0,0,0,0,0,jfg::modern_recorded_flags(0U,recorded)}};
+        check(events[1].sample.modern_flags==0U,"samples without Modern identity record no Ground movement");
+        check((events[0].sample.modern_flags&0x81U)==0x81U,"recording Ground movement keeps the live Modern flags");
+        const TemporaryReplay recording(serialize_v9(events));
+        jfg::DeterministicInputReplay replay;
+        check(jfg::DeterministicInputReplay::load(recording.path(),replay,jfg::InputReplayOrder::recorded_poll)==
+            jfg::InputReplayError::none,"recorder Ground movement output loads as v9");
+        const std::string expected=recorded==ModernGroundMovement::run_toward_input?"RR":"FF";
+        check(replay_ground_trace(replay)==expected,"playback uses the recorded Ground movement");
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -418,5 +522,8 @@ int main() {
     test_replay_modern_controls_hold_until_mapping_input();
     test_replay_modern_controls_switch_mid_recording();
     test_replay_modern_controls_old_formats_stay_off();
+    test_ground_movement_recording();
+    test_replay_ground_movement_follows_recording();
+    test_recorded_ground_movement_replays_as_recorded();
     return failures == 0 ? 0 : 1;
 }

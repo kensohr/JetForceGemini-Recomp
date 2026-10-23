@@ -351,6 +351,16 @@ inline constexpr std::array<std::uint32_t,9> kExpertGuestTable{
     0x2000,0x4000,0x8000,0x8,0x4,0x2,0x1,0x8,0x4};
 // Replay flag bit 7 selects action semantics. Bits 0..2 hold scope actions.
 inline constexpr std::uint8_t kModernActionsFlag=0x80;
+// v9+: player 1 was on Ground movement Run toward input for this poll; a
+// clear bit means Face the camera. Only valid together with kModernActionsFlag.
+inline constexpr std::uint8_t kModernRunTowardInputFlag=0x20;
+// The v9 recorder's modern_flags for one poll: the live flags plus player 1's
+// effective Ground movement. Samples without Modern identity stay unchanged.
+inline std::uint8_t modern_recorded_flags(std::uint8_t live_flags,ModernGroundMovement ground) {
+    const bool modern_sample=(live_flags&kModernActionsFlag)!=0;
+    if(!modern_sample || ground!=ModernGroundMovement::run_toward_input)return live_flags;
+    return static_cast<std::uint8_t>(live_flags|kModernRunTowardInputFlag);
+}
 inline std::uint8_t modern_scope_flags(std::uint32_t held) {
     return static_cast<std::uint8_t>(kModernActionsFlag |
         ((held&modern_bit(ModernAction::scope_cycle))?1:0) |
