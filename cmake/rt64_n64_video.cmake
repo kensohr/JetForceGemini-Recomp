@@ -1,6 +1,8 @@
 # Video core (src/renderer/n64_video) RT64 patch: a native-resolution VI
 # pre-pass that reduces each presented frame to the console's dithered 16-bit
-# colour before RT64's VI pass applies gamma and scales it to the window.
+# colour, runs the VI dither filter and resamples each row to the active
+# scanline width, before RT64's VI pass applies gamma and scales it to the
+# window.
 #
 # Every patched file is checked against the pinned RT64 input (line endings
 # normalised), so a changed RT64 file fails the build instead of being patched
@@ -33,38 +35,72 @@ function(jfg_n64_video_patch_contents relative)
     if(relative STREQUAL "src/shaders/VideoInterfacePS.hlsl")
         jfg_n64_video_replace([==[float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET {
 #ifdef PIXEL_ANTIALIASING]==] [==[#ifdef VI_PREPASS
-// Native-resolution VI pre-pass: one invocation per framebuffer pixel.
+// Native-resolution VI pre-pass: one invocation per output sample of each
+// framebuffer row. It reduces the frame to the RDP's 16-bit colour, runs the
+// VI dither filter and resamples the row to the active scanline width.
 
 // RDP colour-dither matrices, indexed by ((y & 3) << 2) | (x & 3). Same
 // values as RT64's DitherPatternMagicSquare and DitherPatternBayer.
 static const uint ViDitherMagicSquare[16] = { 0, 6, 1, 7, 4, 2, 5, 3, 3, 5, 2, 4, 7, 1, 6, 0 };
 static const uint ViDitherBayer[16] = { 0, 4, 1, 5, 4, 0, 5, 1, 3, 7, 2, 6, 7, 3, 6, 2 };
 
-uint ViDitherValue(uint2 pixel) {
-    const uint index = ((pixel.y & 3) << 2) | (pixel.x & 3);
+uint ViDitherValue(int2 pixel) {
+    const uint index = ((uint(pixel.y) & 3) << 2) | (uint(pixel.x) & 3);
     return (gConstants.ditherPattern == 1) ? ViDitherBayer[index] : ViDitherMagicSquare[index];
 }
 
 // The RDP's 16-bit colour write: add the dither value to each 8-bit channel,
-// clamp, keep the top 5 bits. Expanded back to 8 bits like RT64's
-// RGBA16ToFloat4.
-float3 ReduceToRGBA5551(float3 color, uint dither) {
+// clamp, keep the top 5 bits.
+int3 ReduceToRGB5(float3 color, uint dither) {
     const uint3 channel8 = uint3(round(saturate(color) * 255.0f));
-    const uint3 channel5 = min(channel8 + dither, 255u) >> 3;
-    return float3((channel5 << 3) | (channel5 >> 2)) / 255.0f;
+    return int3(min(channel8 + dither, 255u) >> 3);
+}
+
+// A framebuffer pixel as the RDP stored it in 16 bits, read from the rendered
+// frame's texel at the pixel's centre (the same pixel at 1x). Pixels outside
+// the framebuffer repeat its edge.
+int3 ViFetchRGB5(int2 pixel) {
+    const int2 framebufferSize = int2(gConstants.framebufferWidth, gConstants.framebufferHeight);
+    pixel = clamp(pixel, int2(0, 0), framebufferSize - 1);
+    const float2 texelsPerPixel = gConstants.videoResolution / float2(framebufferSize);
+    const int2 lastTexel = int2(gConstants.textureResolution) - 1;
+    const int2 texel = min(int2((float2(pixel) + 0.5f) * texelsPerPixel), lastTexel);
+    return ReduceToRGB5(gInput.Load(int3(texel, 0)).rgb, ViDitherValue(pixel));
+}
+
+// The VI reads each 5-bit channel as an 8-bit one with the low 3 bits clear.
+// Its dither filter restores some of them: the channel moves one step toward
+// each of the 8 neighbours whose 5-bit value differs from its own.
+int3 ViFilteredPixel(int2 pixel) {
+    const int3 centre = ViFetchRGB5(pixel);
+    int3 color = centre << 3;
+    if (gConstants.ditherFilter != 0) {
+        [unroll] for (int dy = -1; dy <= 1; dy++) {
+            [unroll] for (int dx = -1; dx <= 1; dx++) {
+                if ((dx != 0) || (dy != 0)) {
+                    color += sign(ViFetchRGB5(pixel + int2(dx, dy)) - centre);
+                }
+            }
+        }
+    }
+
+    return color;
 }
 
 float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET {
-    // The rendered frame's texel at this framebuffer pixel's centre. At 1x
-    // they are the same pixel.
-    const int2 lastTexel = int2(gConstants.textureResolution) - 1;
-    const int2 texel = min(int2(uv * gConstants.videoResolution), lastTexel);
-    float3 color = gInput.Load(int3(texel, 0)).rgb;
-    if (gConstants.colourReduction != 0) {
-        color = ReduceToRGBA5551(color, ViDitherValue(uint2(pos.xy)));
+    // The sample's position in framebuffer pixels, 2.10 fixed point. The VI
+    // interpolates with the top 5 bits of the fraction.
+    const uint2 outputPixel = uint2(pos.xy);
+    const uint position = gConstants.xOffset + outputPixel.x * gConstants.xStep;
+    const int2 pixel = int2(position >> 10, outputPixel.y);
+    int3 color = ViFilteredPixel(pixel);
+    if (gConstants.resampling == 0) {
+        const int fraction = int((position >> 5) & 31);
+        const int3 next = ViFilteredPixel(pixel + int2(1, 0));
+        color += ((next - color) * fraction + 16) >> 5;
     }
 
-    return float4(color, 1.0f);
+    return float4(float3(color) / 255.0f, 1.0f);
 }
 #else
 float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET {
@@ -72,10 +108,16 @@ float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET
         string(APPEND contents "\n#endif // VI_PREPASS\n")
     elseif(relative STREQUAL "src/shared/rt64_video_interface.h")
         jfg_n64_video_replace([==[        float gamma;]==] [==[        float gamma;
-        // VI pre-pass: reduce to dithered 16-bit colour (0 or 1), with the
-        // RDP colour-dither pattern (0 magic square, 1 Bayer).
-        uint colourReduction;
-        uint ditherPattern;]==])
+        // VI pre-pass: RDP colour-dither pattern (0 magic square, 1 Bayer),
+        // VI dither filter (0 or 1), resampling (0 interpolate, 1 replicate),
+        // X step and offset (2.10 fixed point) and the framebuffer size.
+        uint ditherPattern;
+        uint ditherFilter;
+        uint resampling;
+        uint xStep;
+        uint xOffset;
+        uint framebufferWidth;
+        uint framebufferHeight;]==])
     elseif(relative STREQUAL "CMakeLists.txt")
         jfg_n64_video_replace([==[build_pixel_shader(  rt64 "src/shaders/VideoInterfacePS.hlsl" "src/shaders/VideoInterfacePSPixel.hlsl" "-D PIXEL_ANTIALIASING")]==] [==[build_pixel_shader(  rt64 "src/shaders/VideoInterfacePS.hlsl" "src/shaders/VideoInterfacePSPixel.hlsl" "-D PIXEL_ANTIALIASING")
 build_pixel_shader(  rt64 "src/shaders/VideoInterfacePS.hlsl" "src/shaders/VideoInterfacePSPrepass.hlsl" "-D VI_PREPASS")]==])
@@ -119,7 +161,8 @@ build_pixel_shader(  rt64 "src/shaders/VideoInterfacePS.hlsl" "src/shaders/Video
     elseif(relative STREQUAL "src/render/rt64_vi_renderer.cpp")
         jfg_n64_video_replace([==[#include "shared/rt64_video_interface.h"]==] [==[#include "shared/rt64_video_interface.h"
 
-#include "n64_video/colour_reduction.hpp"]==])
+#include "n64_video/colour_reduction.hpp"
+#include "n64_video/vi_filtering.hpp"]==])
         jfg_n64_video_replace([==[    void VIRenderer::render(const RenderParams &p) {]==] [==[    void VIRenderer::render(const RenderParams &frameParams) {
         // When the pre-pass runs, its native-resolution output replaces the
         // frame this pass scales to the window.
@@ -132,19 +175,23 @@ build_pixel_shader(  rt64 "src/shaders/VideoInterfacePS.hlsl" "src/shaders/Video
             videoResolution = hlslpp::float2(float(prepassWidth), float(prepassHeight));
         }
 ]==])
-        jfg_n64_video_replace([==[        pushConstants.videoResolution = computeHDSize(hlslpp::float2(p.vi->fbSize()), p.resolutionScale, p.downsamplingScale);]==] [==[        pushConstants.videoResolution = videoResolution;
-        pushConstants.colourReduction = 0;
-        pushConstants.ditherPattern = 0;]==])
-        jfg_n64_video_replace([==[    void VIRenderer::getViewportAndScissor(]==] [==[    // Draws the frame at framebuffer resolution into prepassTexture, reduced
-    // to the console's 16-bit colour as the video core decides from its
-    // options and VI_CONTROL. Returns false, drawing nothing, when the
-    // reduction is off.
+        jfg_n64_video_replace([==[        interop::VideoInterfaceCB pushConstants;
+        pushConstants.videoResolution = computeHDSize(hlslpp::float2(p.vi->fbSize()), p.resolutionScale, p.downsamplingScale);]==] [==[        interop::VideoInterfaceCB pushConstants = {};
+        pushConstants.videoResolution = videoResolution;]==])
+        jfg_n64_video_replace([==[    void VIRenderer::getViewportAndScissor(]==] [==[    // Draws the frame into prepassTexture, one row per framebuffer row and
+    // one column per sample of the active scanline: reduced to the console's
+    // 16-bit colour, dither-filtered and resampled as the video core decides
+    // from its options and the VI registers. Returns false, drawing nothing,
+    // when the reduction is off or the VI shows nothing.
     bool VIRenderer::renderPrepass(const RenderParams &p) {
         const n64_video::ColourReduction reduction = n64_video::colour_reduction(n64_video::active_options(), p.vi->status.word);
+        const n64_video::ViFiltering filtering = n64_video::vi_filtering({ p.vi->status.word, p.vi->hRegion.word, p.vi->xTransform.word });
         const hlslpp::uint2 framebufferSize = p.vi->fbSize();
-        const uint32_t width = framebufferSize.x;
+        const uint32_t framebufferWidth = framebufferSize.x;
+        const uint32_t width = filtering.active_width;
         const uint32_t height = framebufferSize.y;
-        if (!reduction.enabled || (p.framebuffer == nullptr) || (width == 0) || (height == 0)) {
+        const bool hasFrame = (framebufferWidth > 0) && (height > 0) && (width > 0) && (filtering.x_step > 0);
+        if (!reduction.enabled || (p.framebuffer == nullptr) || !hasFrame) {
             return false;
         }
 
@@ -163,12 +210,17 @@ build_pixel_shader(  rt64 "src/shaders/VideoInterfacePS.hlsl" "src/shaders/Video
 
         prepassDescriptorSet->setTexture(prepassDescriptorSet->gInput, p.texture, RenderTextureLayout::SHADER_READ);
 
-        interop::VideoInterfaceCB pushConstants;
+        interop::VideoInterfaceCB pushConstants = {};
         pushConstants.videoResolution = computeHDSize(hlslpp::float2(framebufferSize), p.resolutionScale, p.downsamplingScale);
         pushConstants.textureResolution = { float(p.textureWidth), float(p.textureHeight) };
         pushConstants.gamma = p.vi->gamma();
-        pushConstants.colourReduction = 1;
         pushConstants.ditherPattern = uint32_t(reduction.pattern);
+        pushConstants.ditherFilter = filtering.dither_filter ? 1 : 0;
+        pushConstants.resampling = uint32_t(filtering.resampling);
+        pushConstants.xStep = filtering.x_step;
+        pushConstants.xOffset = filtering.x_offset;
+        pushConstants.framebufferWidth = framebufferWidth;
+        pushConstants.framebufferHeight = height;
 
         const ShaderRecord &shader = p.shaderLibrary->videoInterfacePrepass;
         p.commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(prepassTexture.get(), RenderTextureLayout::COLOR_WRITE));
