@@ -359,10 +359,10 @@
       modernButton("mc-ground-run","Run toward input (original)",!faceCamera)+modernButton("mc-ground-face-camera","Face the camera (strafe)",faceCamera)+"</div><div class=\"mc-hint\">"+
       std::string(faceCamera?"You always face the camera direction: sideways input strafes and back walks backward.":
         "Your character turns and runs in the direction you push, relative to the camera, as in the original game.")+
-      " Aiming always faces the camera.</div></div>";
+      " Aiming and crouching always face the camera.</div></div>";
     if(pcKeyboard())return "<div id=\"mc-settings-scroll\" class=\"mc-settings-scroll\"><div class=\"mc-settings-grid\"><section id=\"mc-movement-card\" class=\"mc-settings-card\"><div class=\"mc-section-title\">MOVEMENT</div>"+groundMovement+
       modernSwitch("mc-original-acceleration","Original movement acceleration",
-        "Ease into movement and slow down gradually when releasing keys. Off gives immediate starts and stops. Top speed stays the same.",c.mouse_original_acceleration)+automaticRoll+"</section></div></div>";
+        "Face the camera only: ease into movement and slow down gradually when releasing keys. Off gives immediate starts and stops. Top speed stays the same. Run toward input always uses the original acceleration.",c.mouse_original_acceleration)+automaticRoll+"</section></div></div>";
     return "<div id=\"mc-settings-scroll\" class=\"mc-settings-scroll\"><div class=\"mc-settings-grid\"><div class=\"mc-settings-column\"><section class=\"mc-settings-card\"><div class=\"mc-section-title\">VERTICAL LOOK</div>"+
       modernRange("vertical","Vertical sensitivity",c.look.stick_vertical_sensitivity,10,300)+
       modernSwitch("mc-floyd-flight-invert","Invert Floyd flight steering","Floyd missions: push up to fly down. Turn off to fly up.",c.pad_floyd_flight_invert_y)+"</section><section id=\"mc-movement-card\" class=\"mc-settings-card\"><div class=\"mc-section-title\">MOVEMENT</div>"+groundMovement+automaticRoll+"</section></div><div class=\"mc-settings-column\"><section class=\"mc-settings-card\"><div class=\"mc-section-title\">BINDING THRESHOLDS</div>"+

@@ -104,7 +104,8 @@ public:
     // Recordings before v9 never set the bit, so they replay without it.
     [[nodiscard]] bool original_acceleration() const noexcept { return original_acceleration_; }
 
-    // Returns true when the sample changes the held state.
+    // Returns true when the sample changes any held value: active(),
+    // ground_movement() or original_acceleration().
     bool observe(const ControllerReplaySample& sample) noexcept;
 
 private:

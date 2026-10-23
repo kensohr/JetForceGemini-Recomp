@@ -85,7 +85,7 @@ template <typename Value>
        (mode!=3 && mode!=5 && (look_x < -127 || look_x>127 || look_y < -127 || look_y>127))))
       return false;
     unsigned modern_flags=0;
-    const unsigned known_flags = 0x87U | kModernRollFlags |
+    const unsigned known_flags = kModernActionsFlag | kModernScopeActionFlags | kModernRollFlags |
         (has_movement_options ? (kModernRunTowardInputFlag | kModernOriginalAccelerationFlag) : 0U);
     if(has_actions && (!parse_integer(fields[9],modern_flags) ||
         (modern_flags!=0 && ((modern_flags&kModernActionsFlag)==0 || (modern_flags&~known_flags)!=0)) ||
@@ -215,18 +215,23 @@ bool controller_mapping_input(const ControllerReplaySample& sample) noexcept {
 bool ReplayModernControls::observe(const ControllerReplaySample& sample) noexcept {
     // Modern devices record neutral flag-0 samples while waiting for release
     // after a device change, so only real Controller Mapping input ends Modern.
-    bool next = active_;
+    bool next_active = active_;
+    ModernGroundMovement next_ground_movement = ground_movement_;
+    bool next_original_acceleration = original_acceleration_;
     if ((sample.modern_flags & kModernActionsFlag) != 0U) {
-        next = true;
+        next_active = true;
         const bool run_toward_input = (sample.modern_flags & kModernRunTowardInputFlag) != 0U;
-        ground_movement_ = run_toward_input ? ModernGroundMovement::run_toward_input
-                                            : ModernGroundMovement::face_camera;
-        original_acceleration_ = (sample.modern_flags & kModernOriginalAccelerationFlag) != 0U;
+        next_ground_movement = run_toward_input ? ModernGroundMovement::run_toward_input
+                                                : ModernGroundMovement::face_camera;
+        next_original_acceleration = (sample.modern_flags & kModernOriginalAccelerationFlag) != 0U;
     } else if (sample.connected && controller_mapping_input(sample)) {
-        next = false;
+        next_active = false;
     }
-    const bool changed = next != active_;
-    active_ = next;
+    const bool changed = next_active != active_ || next_ground_movement != ground_movement_ ||
+        next_original_acceleration != original_acceleration_;
+    active_ = next_active;
+    ground_movement_ = next_ground_movement;
+    original_acceleration_ = next_original_acceleration;
     return changed;
 }
 

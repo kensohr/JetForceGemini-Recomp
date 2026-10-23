@@ -41,14 +41,21 @@ enum class ModernGlyphStyle { automatic=0, xbox=1, playstation=2 };
 // Non-aiming ground locomotion. Run toward input is the original game's
 // camera-relative running; face the camera is view-locked strafing.
 enum class ModernGroundMovement { run_toward_input=0, face_camera=1 };
+// Native player movement states (the control block's byte at +0x568).
+inline constexpr unsigned kMovementStateGround=0U;
+inline constexpr unsigned kMovementStateCrouch=2U;
+inline constexpr unsigned kMovementStateAirborne=3U;
+inline constexpr unsigned kMovementStateAim=10U;
+// Standing aim: pc_aim_movement's standing channels.
+inline constexpr unsigned kMovementStateStandingAim=11U;
 // Whether the Modern shoulder adapter locks the body to the view direction
-// in this native movement state (0 normal ground, 2 crouch, 3 airborne,
-// 10/11 aim). Run toward input leaves normal ground movement and airborne
-// body yaw to the native handler; aim and crouch stay view-locked.
+// in this native movement state. Run toward input leaves normal ground
+// movement and airborne body yaw to the native handler; aim and crouch stay
+// view-locked.
 inline bool modern_view_locked_movement(ModernGroundMovement ground,unsigned movement_state,bool air_aim) {
     if(ground==ModernGroundMovement::face_camera)return true;
-    if(movement_state==0U)return false;
-    if(movement_state==3U)return air_aim;
+    if(movement_state==kMovementStateGround)return false;
+    if(movement_state==kMovementStateAirborne)return air_aim;
     return true;
 }
 struct ModernControlsConfig {
@@ -351,6 +358,8 @@ inline constexpr std::array<std::uint32_t,9> kExpertGuestTable{
     0x2000,0x4000,0x8000,0x8,0x4,0x2,0x1,0x8,0x4};
 // Replay flag bit 7 selects action semantics. Bits 0..2 hold scope actions.
 inline constexpr std::uint8_t kModernActionsFlag=0x80;
+// Bits 0..2: held scope cycle, increase and decrease actions.
+inline constexpr std::uint8_t kModernScopeActionFlags=0x07;
 // v9+: player 1 was on Ground movement Run toward input for this poll; a
 // clear bit means Face the camera. Only valid together with kModernActionsFlag.
 inline constexpr std::uint8_t kModernRunTowardInputFlag=0x20;
