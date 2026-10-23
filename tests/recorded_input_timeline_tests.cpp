@@ -117,5 +117,31 @@ int main() {
   const std::array<InputReplayEvent,2> no_identity{{{1,2,stray_flag},{2,3,original_mode}}};RecordedInputTimeline original_context;
   a=original_context.sample(2,no_identity);
   check(a && jfg::modern_roll_side_buttons(a->modern_flags)==0,"mode 0 alone does not opt Original controls into roll semantics");
+  {
+    const auto run_flag=jfg::kModernRunTowardInputFlag;
+    const auto runs=[&](const std::optional<ControllerReplaySample>& sample){
+      return sample && (sample->modern_flags&run_flag)!=0;
+    };
+    ControllerReplaySample running;running.pc_mode=3;running.stick_y=80;
+    running.modern_flags=static_cast<std::uint8_t>(jfg::kModernActionsFlag|run_flag);
+    auto facing=running;facing.modern_flags=jfg::kModernActionsFlag;
+    const std::array<InputReplayEvent,2> change{{{10,11,running},{20,21,facing}}};
+    RecordedInputTimeline ground;
+    check(runs(ground.sample(10,change)) && runs(ground.sample(15,change)) && runs(ground.sample(19,change)),
+      "Run toward input is held between recorded polls");
+    a=ground.sample(20,change);
+    check(a && !runs(a) && (a->modern_flags&jfg::kModernActionsFlag)!=0,"a mid-recording change to Face the camera applies from its poll");
+    const std::array<InputReplayEvent,2> back{{{10,11,facing},{11,12,running}}};
+    RecordedInputTimeline skipped_poll;
+    check(runs(skipped_poll.sample(12,back)),"a skipped poll takes the latest Ground movement");
+    auto left=running;left.modern_flags|=jfg::kModernRollLeftFlag;left.stick_x=-80;
+    const std::array<InputReplayEvent,3> roll{{{1,2,running},{2,3,left},{3,4,running}}};
+    RecordedInputTimeline pulse;a=pulse.sample(3,roll);
+    check(a && runs(a) && jfg::modern_roll_side_buttons(a->modern_flags)==2,"a preserved roll pulse keeps Run toward input");
+    auto facing_left=left;facing_left.modern_flags=static_cast<std::uint8_t>(jfg::kModernActionsFlag|jfg::kModernRollLeftFlag);
+    const std::array<InputReplayEvent,3> facing_roll{{{1,2,facing},{2,3,facing_left},{3,4,facing}}};
+    RecordedInputTimeline facing_pulse;a=facing_pulse.sample(3,facing_roll);
+    check(a && !runs(a) && jfg::modern_roll_side_buttons(a->modern_flags)==2,"roll merging never invents Run toward input");
+  }
   std::printf("%u recorded timeline checks, %u failures\n",checks,failures);return failures==0?0:1;
 }

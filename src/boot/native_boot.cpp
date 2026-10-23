@@ -3246,6 +3246,7 @@ void set_modern_controls_active(State &state,bool active) {
 void apply_replay_modern_controls(State &state) {
   const bool modern=state.replay_modern_controls.active();
   for(std::size_t p=0;p<state.modern_controls.size();++p)state.modern_controls[p].enabled=p==0U && modern;
+  state.modern_controls[0].ground_movement=state.replay_modern_controls.ground_movement();
   set_modern_controls_active(state,modern);
 }
 void reload_controller_ports(State &state) {
@@ -3268,8 +3269,11 @@ void reload_controller_ports(State &state) {
     if(modern.status==jfg::ConfigFileValue::Status::ready) {
       auto candidate=state.modern_controls[p];
       const bool parsed=jfg::parse_modern_controls(modern.text,candidate);
-      // The live profile must not change a replay's recorded style.
-      if(state.input_replay_loaded)candidate.enabled=state.modern_controls[p].enabled;
+      // The live profile must not change a replay's recorded style or Ground movement.
+      if(state.input_replay_loaded) {
+        candidate.enabled=state.modern_controls[p].enabled;
+        candidate.ground_movement=state.modern_controls[p].ground_movement;
+      }
       if(parsed &&
          jfg::serialize_modern_controls(candidate)!=jfg::serialize_modern_controls(state.modern_controls[p])) {
         state.modern_controls[p]=candidate;state.modern_aim_latch[p].reset();
@@ -3644,6 +3648,12 @@ void sample_live_controller(State &state) noexcept {
       state.gameplay_trace.event("replay-modern-controls",{state.vi_retraces,state.replay_modern_controls.active()?1U:0U});
       apply_replay_modern_controls(state);
     }
+    // v9 samples carry player 1's Ground movement; it may change without a style change.
+    const auto replay_ground=state.replay_modern_controls.ground_movement();
+    if(state.modern_controls[0].ground_movement!=replay_ground) {
+      state.gameplay_trace.event("replay-ground-movement",{state.vi_retraces,static_cast<unsigned>(replay_ground)});
+      state.modern_controls[0].ground_movement=replay_ground;
+    }
     if(state.modern_controls_active)state.pc_frames[0]=replay;
     menu_kind=replay.menu_kind;menu_target=replay.menu_target;
     connected = replay.connected;
@@ -3932,7 +3942,7 @@ void sample_live_controller(State &state) noexcept {
                        << stick_y;
     if(state.pc_record_extended) {
       const auto &pc=state.pc_frames[0];
-      state.input_record << ',' << int(pc.pc_mode) << ',' << pc.look_x << ',' << pc.look_y << ',' << int(pc.modern_flags) << ',' << int(menu_kind) << ',' << int(menu_target);
+      state.input_record << ',' << int(pc.pc_mode) << ',' << pc.look_x << ',' << pc.look_y << ',' << int(jfg::modern_recorded_flags(pc.modern_flags,state.modern_controls[0].ground_movement)) << ',' << int(menu_kind) << ',' << int(menu_target);
     }
     state.input_record << '\n';
   }
@@ -14130,7 +14140,7 @@ int run_child(const char *path, const unsigned retrace_target,
     reload_controller_ports(state);
     state.pc_record_extended=state.modern_controls_active;
 #endif
-    state.input_record << (state.pc_record_extended?jfg::kInputReplayHeaderV8:jfg::kInputReplayHeader) << '\n';
+    state.input_record << (state.pc_record_extended?jfg::kInputReplayHeaderV9:jfg::kInputReplayHeader) << '\n';
   }
   if (!state.retrace_hash_path.empty()) {
     state.retrace_hash_trace.open(state.retrace_hash_path,
