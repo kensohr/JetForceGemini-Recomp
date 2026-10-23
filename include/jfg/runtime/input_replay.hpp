@@ -1,5 +1,7 @@
 #pragma once
 
+#include "jfg/runtime/modern_controls.hpp"
+
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -7,6 +9,7 @@
 
 namespace jfg {
 
+inline constexpr char kInputReplayHeaderV9[] = "jfg-phase8-input-v9";
 inline constexpr char kInputReplayHeaderV8[] = "jfg-phase8-input-v8";
 inline constexpr char kInputReplayHeaderV7[] = "jfg-phase8-input-v7";
 inline constexpr char kInputReplayHeaderV6[] = "jfg-phase8-input-v6";
@@ -34,6 +37,8 @@ struct ControllerReplaySample {
     // v5+: bit 7 selects Modern action semantics; bits 0..2 are held scope actions.
     // Bits 3/4 explicitly record left/right roll intent. Older recordings lack
     // these bits and retain their original behavior; axes never imply intent.
+    // v9+: bit 5 records player 1's Ground movement (set: Run toward input,
+    // clear: Face the camera); only valid together with bit 7.
     std::uint8_t modern_flags = 0;
 
     // v6: semantic native-menu selection, separate from emulated pad input.
@@ -90,12 +95,17 @@ private:
 class ReplayModernControls final {
 public:
     [[nodiscard]] bool active() const noexcept { return active_; }
+    // Player 1's Ground movement, taken from the latest sample with Modern
+    // action semantics. Recordings before v9 never set the bit, so they replay
+    // as Face the camera, the movement they were recorded with.
+    [[nodiscard]] ModernGroundMovement ground_movement() const noexcept { return ground_movement_; }
 
     // Returns true when the sample changes the held state.
     bool observe(const ControllerReplaySample& sample) noexcept;
 
 private:
     bool active_ = false;
+    ModernGroundMovement ground_movement_ = ModernGroundMovement::face_camera;
 };
 
 }  // namespace jfg
