@@ -38,7 +38,8 @@ struct ControllerReplaySample {
     // Bits 3/4 explicitly record left/right roll intent. Older recordings lack
     // these bits and retain their original behavior; axes never imply intent.
     // v9+: bit 5 records player 1's Ground movement (set: Run toward input,
-    // clear: Face the camera); only valid together with bit 7.
+    // clear: Face the camera); bit 6 records player 1's Original movement
+    // acceleration option on any pc_mode. Both are only valid together with bit 7.
     std::uint8_t modern_flags = 0;
 
     // v6: semantic native-menu selection, separate from emulated pad input.
@@ -99,6 +100,9 @@ public:
     // action semantics. Recordings before v9 never set the bit, so they replay
     // as Face the camera, the movement they were recorded with.
     [[nodiscard]] ModernGroundMovement ground_movement() const noexcept { return ground_movement_; }
+    // Player 1's Original movement acceleration option, held the same way.
+    // Recordings before v9 never set the bit, so they replay without it.
+    [[nodiscard]] bool original_acceleration() const noexcept { return original_acceleration_; }
 
     // Returns true when the sample changes the held state.
     bool observe(const ControllerReplaySample& sample) noexcept;
@@ -106,6 +110,7 @@ public:
 private:
     bool active_ = false;
     ModernGroundMovement ground_movement_ = ModernGroundMovement::face_camera;
+    bool original_acceleration_ = false;
 };
 
 }  // namespace jfg

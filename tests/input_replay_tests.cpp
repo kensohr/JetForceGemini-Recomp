@@ -432,11 +432,10 @@ void test_ground_movement_recording() {
     const TemporaryReplay roundtrip(serialize_v9(before));
     check(jfg::DeterministicInputReplay::load(roundtrip.path(),replay)==jfg::InputReplayError::none &&
         replay.events()==before,"v9 serialization roundtrips the Ground movement bit");
-    for(const auto *row:{"1,2,1,0,0,0,3,0,0,32,0,0","1,2,0,0,0,0,0,0,0,160,0,0",
-        "1,2,1,0,0,0,3,0,0,224,0,0"}) {
+    for(const auto *row:{"1,2,1,0,0,0,3,0,0,32,0,0","1,2,0,0,0,0,0,0,0,160,0,0"}) {
         const TemporaryReplay bad(std::string("jfg-phase8-input-v9\n")+row+"\n");
         check(jfg::DeterministicInputReplay::load(bad.path(),replay)==jfg::InputReplayError::invalid_record &&
-            replay.events()==before,"v9 Ground movement needs Modern identity, a connection and known bits");
+            replay.events()==before,"v9 Ground movement needs Modern identity and a connection");
     }
     for(const auto *old:{"jfg-phase8-input-v5\n1,2,1,0,0,0,3,0,0,160\n",
         "jfg-phase8-input-v6\n1,2,1,0,0,0,3,0,0,160,0,0\n","jfg-phase8-input-v7\n1,2,1,0,0,0,3,0,0,160,0,0\n",
@@ -490,9 +489,10 @@ void test_recorded_ground_movement_replays_as_recorded() {
     using jfg::ModernGroundMovement;
     for(const auto recorded:{ModernGroundMovement::run_toward_input,ModernGroundMovement::face_camera}) {
         // A recorder poll with scope cycle held, then one waiting for device release.
+        jfg::ModernControlsConfig profile;profile.ground_movement=recorded;
         std::vector<jfg::InputReplayEvent> events(2);
-        events[0]={1,2,{true,0,0,80,3,0,0,jfg::modern_recorded_flags(0x81U,recorded)}};
-        events[1]={2,3,{true,0,0,0,0,0,0,jfg::modern_recorded_flags(0U,recorded)}};
+        events[0]={1,2,{true,0,0,80,3,0,0,jfg::modern_recorded_flags(0x81U,profile)}};
+        events[1]={2,3,{true,0,0,0,0,0,0,jfg::modern_recorded_flags(0U,profile)}};
         check(events[1].sample.modern_flags==0U,"samples without Modern identity record no Ground movement");
         check((events[0].sample.modern_flags&0x81U)==0x81U,"recording Ground movement keeps the live Modern flags");
         const TemporaryReplay recording(serialize_v9(events));
@@ -501,6 +501,105 @@ void test_recorded_ground_movement_replays_as_recorded() {
             jfg::InputReplayError::none,"recorder Ground movement output loads as v9");
         const std::string expected=recorded==ModernGroundMovement::run_toward_input?"RR":"FF";
         check(replay_ground_trace(replay)==expected,"playback uses the recorded Ground movement");
+    }
+}
+
+void test_original_acceleration_recording() {
+    // 0xC0: Modern actions with Original movement acceleration on; 0x80: off.
+    // The bit records the option itself, so it is valid on any pc_mode.
+    const TemporaryReplay valid("jfg-phase8-input-v9\n"
+        "1,2,1,0,0,80,3,4,0,192,0,0\n"
+        "2,3,1,0,0,80,3,0,0,128,0,0\n"
+        "3,4,1,0,-80,0,3,0,0,255,0,0\n"
+        "4,5,1,0,0,0,0,0,0,192,0,0\n"
+        "5,6,1,0,0,0,0,0,0,0,0,0\n");
+    jfg::DeterministicInputReplay replay;
+    check(jfg::DeterministicInputReplay::load(valid.path(),replay)==jfg::InputReplayError::none,
+        "v9 recordings carry the Original movement acceleration bit");
+    check(replay.sample_by_poll(0).modern_flags==(jfg::kModernActionsFlag|jfg::kModernOriginalAccelerationFlag) &&
+        replay.sample_by_poll(1).modern_flags==jfg::kModernActionsFlag,"v9 keeps the acceleration bit both set and clear");
+    const auto all_flags=replay.sample_by_poll(2).modern_flags;
+    check((all_flags&7U)==7U && (all_flags&jfg::kModernRollFlags)==jfg::kModernRollFlags &&
+        (all_flags&jfg::kModernRunTowardInputFlag)!=0 && (all_flags&jfg::kModernOriginalAccelerationFlag)!=0,
+        "the acceleration bit coexists with scope, roll and Ground movement flags");
+    check(replay.sample_by_poll(3).pc_mode==0 &&
+        (replay.sample_by_poll(3).modern_flags&jfg::kModernOriginalAccelerationFlag)!=0,
+        "the acceleration bit is valid outside pc_mode 3");
+    const auto before=replay.events();
+    const TemporaryReplay roundtrip(serialize_v9(before));
+    check(jfg::DeterministicInputReplay::load(roundtrip.path(),replay)==jfg::InputReplayError::none &&
+        replay.events()==before,"v9 serialization roundtrips the acceleration bit");
+    for(const auto *row:{"1,2,1,0,0,0,3,0,0,64,0,0","1,2,0,0,0,0,0,0,0,192,0,0","1,2,0,0,0,0,0,0,0,64,0,0"}) {
+        const TemporaryReplay bad(std::string("jfg-phase8-input-v9\n")+row+"\n");
+        check(jfg::DeterministicInputReplay::load(bad.path(),replay)==jfg::InputReplayError::invalid_record &&
+            replay.events()==before,"v9 acceleration bit needs Modern identity and a connection");
+    }
+    for(const auto *old:{"jfg-phase8-input-v5\n1,2,1,0,0,0,3,0,0,192\n",
+        "jfg-phase8-input-v6\n1,2,1,0,0,0,3,0,0,192,0,0\n","jfg-phase8-input-v7\n1,2,1,0,0,0,3,0,0,192,0,0\n",
+        "jfg-phase8-input-v8\n1,2,1,0,0,0,3,0,0,192,0,0\n"}) {
+        const TemporaryReplay bad(old);
+        check(jfg::DeterministicInputReplay::load(bad.path(),replay)==jfg::InputReplayError::invalid_record,
+            "v5-v8 recordings cannot carry the acceleration bit");
+    }
+}
+
+std::string replay_acceleration_trace(const jfg::DeterministicInputReplay& replay) {
+    jfg::ReplayModernControls modern;
+    std::string trace;
+    for(std::uint64_t poll=0;poll<replay.events().size();++poll) {
+        (void)modern.observe(replay.sample_by_poll(poll));
+        trace+=modern.original_acceleration()?'A':'-';
+    }
+    return trace;
+}
+
+void test_replay_original_acceleration_follows_recording() {
+    // Release-wait (flag 0), disconnected and Controller Mapping samples carry
+    // no option value, so the last Modern sample's value holds.
+    const TemporaryReplay recording("jfg-phase8-input-v9\n"
+        "1,2,1,0,0,80,3,0,0,192,0,0\n"
+        "2,3,1,0,0,0,0,0,0,0,0,0\n"
+        "3,4,0,0,0,0,0,0,0,0,0,0\n"
+        "4,5,1,0,0,80,3,0,0,128,0,0\n"
+        "5,6,1,8000,0,0,0,0,0,0,0,0\n"
+        "6,7,1,0,0,80,3,0,0,224,0,0\n");
+    jfg::DeterministicInputReplay replay;
+    check(jfg::DeterministicInputReplay::load(recording.path(),replay,jfg::InputReplayOrder::recorded_poll)==
+        jfg::InputReplayError::none,"v9 acceleration recording loads");
+    check(!jfg::ReplayModernControls{}.original_acceleration(),"replayed acceleration starts off");
+    check(replay_acceleration_trace(replay)=="AAA--A",
+        "replayed acceleration follows the recorded bit and holds across samples without Modern identity");
+
+    const TemporaryReplay older("jfg-phase8-input-v8\n"
+        "1,2,1,0,0,80,3,0,0,128,0,0\n"
+        "2,3,1,0,-80,0,5,0,0,143,0,0\n");
+    check(jfg::DeterministicInputReplay::load(older.path(),replay,jfg::InputReplayOrder::recorded_poll)==
+        jfg::InputReplayError::none,"v8 Modern recording loads");
+    check(replay_acceleration_trace(replay)=="--","v8 Modern recordings replay without acceleration");
+}
+
+void test_recorded_original_acceleration_replays_as_recorded() {
+    using jfg::ModernGroundMovement;
+    for(const auto ground:{ModernGroundMovement::run_toward_input,ModernGroundMovement::face_camera}) {
+        for(const bool accelerated:{true,false}) {
+            jfg::ModernControlsConfig profile;
+            profile.ground_movement=ground;
+            profile.mouse_original_acceleration=accelerated;
+            // A recorder poll with scope cycle held, then one waiting for device release.
+            std::vector<jfg::InputReplayEvent> events(2);
+            events[0]={1,2,{true,0,0,80,3,0,0,jfg::modern_recorded_flags(0x81U,profile)}};
+            events[1]={2,3,{true,0,0,0,0,0,0,jfg::modern_recorded_flags(0U,profile)}};
+            check(events[1].sample.modern_flags==0U,"samples without Modern identity record no acceleration");
+            check((events[0].sample.modern_flags&0x81U)==0x81U,"recording acceleration keeps the live Modern flags");
+            const TemporaryReplay recording(serialize_v9(events));
+            jfg::DeterministicInputReplay replay;
+            check(jfg::DeterministicInputReplay::load(recording.path(),replay,jfg::InputReplayOrder::recorded_poll)==
+                jfg::InputReplayError::none,"recorder acceleration output loads as v9");
+            check(replay_acceleration_trace(replay)==(accelerated?"AA":"--"),
+                "playback uses the recorded acceleration option");
+            const std::string expected_ground=ground==ModernGroundMovement::run_toward_input?"RR":"FF";
+            check(replay_ground_trace(replay)==expected_ground,"the acceleration bit leaves the recorded Ground movement intact");
+        }
     }
 }
 
@@ -525,5 +624,8 @@ int main() {
     test_ground_movement_recording();
     test_replay_ground_movement_follows_recording();
     test_recorded_ground_movement_replays_as_recorded();
+    test_original_acceleration_recording();
+    test_replay_original_acceleration_follows_recording();
+    test_recorded_original_acceleration_replays_as_recorded();
     return failures == 0 ? 0 : 1;
 }
