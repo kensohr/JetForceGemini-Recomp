@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Add a per-player Modern **Ground movement** setting (Advanced settings ›
+  Movement). Newly saved Modern profiles use schema 8; older versions reject
+  them and require separate profiles. Earlier profiles load as Run toward input.
+
 ## 1.4.0 - 2026-10-22
 
 - Prevent scenery from interpolating through cinematic camera cuts when a distant
