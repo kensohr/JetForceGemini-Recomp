@@ -1759,6 +1759,8 @@ struct State : JfgOriginalTimingFast {
   float pc_camera_ticks=0;
   bool pc_camera_resolved_valid=false;
   jfg::PcOrbitPoint pc_camera_resolved{};
+  // Focus the leash camera was fed from this camera update, if any.
+  std::optional<jfg::PcOrbitPoint> pc_camera_leash_focus;
   std::uint32_t pc_camera_actor=0,pc_camera_control=0,pc_camera_stack=0;
   jfg::PcLookDelta pc_camera_look{};
   std::uint64_t pc_aim_calls = 0, pc_direct_aim_calls = 0;
@@ -2512,6 +2514,24 @@ bool modern_shoulder_camera_current(const State& state,std::size_t port,std::uin
        modern_swimming_view_current(state,actor)));
 }
 int dispatch(void *opaque,std::int32_t address,std::uint8_t *rdram,recomp_context *context);
+// After the normal camera update: the leash's next bearing starts from this
+// update's collision-resolved position. Without one, reseed next update.
+void follow_leash_camera(State& state,std::size_t port,std::uint32_t actor) {
+  auto& view=state.pc_shoulders[port];
+  if(!view.leash_camera)return;
+  if(!state.pc_camera_leash_focus || !state.pc_camera_resolved_valid) {
+    view.leash.following=false;
+    return;
+  }
+  const auto focus=*state.pc_camera_leash_focus;
+  const auto camera=state.pc_camera_resolved;
+  const int yaw=jfg::pc_shoulder_camera_yaw(view.yaw);
+  view.leash.resolved(focus,camera,yaw);
+  const float distance=std::hypot(camera.x-focus.x,camera.y-focus.y,camera.z-focus.z);
+  state.gameplay_trace.event("pc-leash-camera",{state.vi_retraces,actor,
+    static_cast<std::uint16_t>(yaw),static_cast<std::uint16_t>(view.pitch),
+    std::bit_cast<std::uint32_t>(distance)});
+}
 bool modern_air_aim_active(const State &state,std::uint32_t actor,std::uint32_t control) {
   jfg::mod::Memory ram({state.rdram,kRdramSize});
   if(!ram.valid(actor,0xA4U) || !ram.valid(control,0x5D0U) || ram.u32(actor+0x68U)!=control)return false;
@@ -2671,6 +2691,10 @@ public:
     view.movement_before_update={std::bit_cast<float>(ram.u32(control+0x10U)),
                                  std::bit_cast<float>(ram.u32(control+4U))};
     view.retrace=state.vi_retraces;view.aiming=aiming;
+    // The camera follows as a leash exactly when the body is not locked to
+    // the view (camera-relative running). Any other update reseeds it.
+    view.leash_camera=!view_only && !modern_view_locked(state,port,movement,view.air_aim);
+    if(!view.leash_camera)view.leash.following=false;
     if(!aiming && !state.pc_input_blocked) {
       auto look=jfg::PcLookDelta{frame.look_x,frame.look_y};
       if(frame.pc_mode==3) {
@@ -8787,6 +8811,15 @@ int dispatch(void *opaque, std::int32_t address, std::uint8_t *rdram,
         }
         orbit.active=true;orbit.actor=actor;orbit.retrace=state.vi_retraces;
         if(modern_shoulder_camera_current(state,port,actor)) {
+          auto& view=state.pc_shoulders[port];
+          if(view.leash_camera) {
+            // The view direction follows the leash, so camera-relative
+            // running and aim entry use the camera's real heading.
+            const jfg::PcOrbitPoint focus{px,py,pz};
+            const int leash_yaw=view.leash.follow_yaw(focus,jfg::pc_shoulder_camera_yaw(view.yaw));
+            view.yaw=jfg::pc_shoulder_camera_yaw(leash_yaw);
+            state.pc_camera_leash_focus=focus;
+          }
           orbit.yaw=jfg::pc_shoulder_camera_yaw(state.pc_shoulders[port].yaw);
           orbit.pitch=state.pc_shoulders[port].pitch;
         } else {
@@ -8982,6 +9015,7 @@ int dispatch(void *opaque, std::int32_t address, std::uint8_t *rdram,
               jfg::pc_camera_delta(frame.pc_mode,look,ticks);
             state.pc_camera_ticks=ticks;
             state.pc_camera_resolved_valid=false;
+            state.pc_camera_leash_focus.reset();
             original(rdram,context);
             if(shoulder && state.pc_camera_resolved_valid) {
               // Use the collision-resolved position this update. The original
@@ -9005,13 +9039,20 @@ int dispatch(void *opaque, std::int32_t address, std::uint8_t *rdram,
                   ram.u32(camera+0xCU),ram.u32(camera+0x10U),ram.u32(camera+0x14U)});
               }
             }
+            if(shoulder)follow_leash_camera(state,port,actor);
             state.gameplay_trace.event("pc-camera-context",{state.vi_retraces,actor,
               ram.u8(control+0x568U),ram.u16(actor+0x48U),ram.u32(control+0x4U),
               ram.u32(control+0x8U),ram.u32(control+0x10U)});
             state.pc_camera_actor=state.pc_camera_control=state.pc_camera_stack=0;state.pc_camera_look={};
+            state.pc_camera_leash_focus.reset();
             return 1;
           }
-        } else state.pc_orbits[port].active=false;
+        } else {
+          // The native camera moves on its own this update; the leash's last
+          // resolved position is stale.
+          state.pc_orbits[port].active=false;
+          state.pc_shoulders[port].leash.following=false;
+        }
       }
     }
   }
