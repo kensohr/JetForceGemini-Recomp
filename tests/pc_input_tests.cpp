@@ -1,5 +1,6 @@
 #include "jfg/runtime/pc_camera_visibility.hpp"
 #include "jfg/runtime/pc_input.hpp"
+#include "jfg/runtime/modern_controls.hpp"
 #include <cstdlib>
 #include "jfg/runtime/window_input_mailbox.hpp"
 #include <iostream>
@@ -7,6 +8,59 @@
 namespace {
 int checks=0;
 void check(bool result,const char* what){++checks;if(!result){std::cerr<<what<<'\n';std::exit(1);}}
+
+// World travel (x, z) of native stick axes under a native camera yaw. This is
+// the stick basis the navigation pilot drives the native player with
+// (include/jfg/mod/navigation_pilot.hpp camera_heading), independent of the
+// helper under test.
+struct Travel { float x=0,z=0; };
+Travel native_travel(jfg::PcStickAxes axes,int camera_yaw) {
+  const float angle=static_cast<float>(camera_yaw)*6.283185307179586F/65536.0F;
+  const float x=static_cast<float>(axes.x),y=static_cast<float>(axes.y);
+  return {-x*std::cos(angle)-y*std::sin(angle),-x*std::sin(angle)+y*std::cos(angle)};
+}
+bool same_travel(Travel a,Travel b,float tolerance) {
+  return std::hypot(a.x-b.x,a.z-b.z)<=tolerance;
+}
+void check_camera_relative_stick() {
+  // The view faces north (+z): its camera yaw is 0. The native camera is a
+  // quarter turn behind, so unrotated axes would run a quarter turn off.
+  constexpr int view_north=32768,stale_native_camera=16384;
+  check(jfg::pc_shoulder_camera_yaw(view_north)==0,"north view uses camera yaw 0");
+  const auto travel=[&](int x,int y) {
+    return native_travel(jfg::pc_camera_relative_stick({x,y},view_north,stale_native_camera),stale_native_camera);
+  };
+  check(same_travel(travel(0,65),{0,65},1.5F),"up runs north, away from the camera");
+  check(same_travel(travel(0,-65),{0,-65},1.5F),"down turns around and runs south toward the camera");
+  check(same_travel(travel(-65,0),{65,0},1.5F) && same_travel(travel(65,0),{-65,0},1.5F),
+    "left and right run to either side of the view");
+  const auto diagonal=travel(46,46);
+  check(std::abs(std::atan2(diagonal.x,diagonal.z)+0.785398F)<0.03F,"diagonals run at 45 degrees");
+  // Any view and native camera yaw: the native handler must see travel
+  // relative to the view direction, in all eight directions.
+  constexpr std::array<jfg::PcStickAxes,8> directions{{{0,65},{46,46},{65,0},{46,-46},
+                                                      {0,-65},{-46,-46},{-65,0},{-46,46}}};
+  for(int view:{0,5000,-12345,32767,-32768,20000})
+    for(int native:{0,7000,-30000,16384,32767}) {
+      const int view_camera=jfg::pc_shoulder_camera_yaw(view);
+      for(auto input:directions) {
+        const auto output=jfg::pc_camera_relative_stick(input,view,native);
+        check(same_travel(native_travel(output,native),native_travel(input,view_camera),1.5F),
+          "stick travel is relative to the view direction at any native camera yaw");
+        check(std::hypot(output.x,output.y)<=std::hypot(input.x,input.y)+0.001F,
+          "rotation never exceeds the native stick magnitude");
+      }
+    }
+  for(int view:{0,9000,-20000}) {
+    const auto aligned=jfg::pc_shoulder_camera_yaw(view);
+    for(auto input:directions) {
+      const auto output=jfg::pc_camera_relative_stick(input,view,aligned);
+      check(output.x==input.x && output.y==input.y,"an agreeing native camera keeps the stick unchanged");
+    }
+  }
+  check(jfg::pc_camera_relative_stick({0,0},0,16384).x==0 &&
+        jfg::pc_camera_relative_stick({0,0},0,16384).y==0,"a released stick stays released");
+}
 
 void check_swimming_camera_collision() {
   // The captured regression has a valid far endpoint above the water while
@@ -267,6 +321,11 @@ int main() {
   auto shoulder=jfg::pc_direct_aim(-32768,2000,{150,40},-8192,10922);
   check(jfg::pc_shoulder_camera_yaw(shoulder.x)==150 && shoulder.y==1960,"one look delta turns body and camera together");
   check(jfg::pc_direct_aim(shoulder.x,shoulder.y,{},-8192,10922)==shoulder,"released mouse leaves the shared view fixed");
+  constexpr auto face_camera=jfg::ModernGroundMovement::face_camera;
+  constexpr auto run_toward_input=jfg::ModernGroundMovement::run_toward_input;
+  // Face the camera: normal ground movement strafes and backpedals under the view.
+  check(jfg::modern_view_locked_movement(face_camera,0U,false),"face the camera locks normal ground movement to the view");
+  check(jfg::modern_view_locked_movement(face_camera,3U,false),"face the camera restores the view direction in the air");
   check(jfg::pc_shoulder_movement(80,0).side==4.0625F && jfg::pc_shoulder_movement(80,0).forward==0,"right movement strafes independently of facing");
   check(jfg::pc_shoulder_movement(0,-80).forward==4.0625F,"backwards movement retains the view direction");
   const auto shoulder_diagonal=jfg::pc_shoulder_movement(80,80);
@@ -274,6 +333,13 @@ int main() {
   check(jfg::pc_shoulder_movement(0,15).forward==-0.9375F,"native partial-stick speed is preserved");
   check(jfg::pc_shoulder_movement(0,55).forward==-3.4375F,"native sixty-unit host input after deadzone");
   check(jfg::pc_shoulder_movement(0,0).forward==0,"locked native axes cannot produce ground movement");
+  // Run toward input: the native handler owns normal running and airborne body yaw.
+  check(!jfg::modern_view_locked_movement(run_toward_input,0U,false),"run toward input leaves normal ground movement to the native handler");
+  check(!jfg::modern_view_locked_movement(run_toward_input,3U,false),"run toward input keeps native body yaw in the air");
+  check(jfg::modern_view_locked_movement(run_toward_input,3U,true),"airborne aim stays view-locked when running toward input");
+  for(unsigned locked:{2U,10U,11U})
+    check(jfg::modern_view_locked_movement(run_toward_input,locked,false),"crouch and aim stay view-locked when running toward input");
+  check_camera_relative_stick();
   for(unsigned character=0;character<3;++character) {
     check(jfg::pc_ground_animation(character,2,2,{0,4})==3,"running can reverse into native backward locomotion");
     check(jfg::pc_ground_animation(character,3,3,{0,-4})==2,"backward locomotion returns to native forward run");
