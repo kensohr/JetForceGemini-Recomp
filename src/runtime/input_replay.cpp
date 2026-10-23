@@ -1,4 +1,5 @@
 #include "jfg/runtime/input_replay.hpp"
+#include "jfg/runtime/modern_controls.hpp"
 #include "jfg/runtime/modern_roll.hpp"
 
 #include <algorithm>
@@ -37,6 +38,7 @@ template <typename Value>
     const bool has_menu,
     const bool has_pause_menu,
     const bool has_options,
+    const bool has_movement_options,
     InputReplayEvent& output) noexcept {
     std::array<std::string_view, 12U> fields{};
     std::size_t field = 0U;
@@ -83,8 +85,10 @@ template <typename Value>
        (mode!=3 && mode!=5 && (look_x < -127 || look_x>127 || look_y < -127 || look_y>127))))
       return false;
     unsigned modern_flags=0;
+    const unsigned known_flags = kModernActionsFlag | kModernScopeActionFlags | kModernRollFlags |
+        (has_movement_options ? (kModernRunTowardInputFlag | kModernOriginalAccelerationFlag) : 0U);
     if(has_actions && (!parse_integer(fields[9],modern_flags) ||
-        (modern_flags!=0 && ((modern_flags&0x80U)==0 || (modern_flags&~(0x87U | kModernRollFlags))!=0)) ||
+        (modern_flags!=0 && ((modern_flags&kModernActionsFlag)==0 || (modern_flags&~known_flags)!=0)) ||
         (!connected && modern_flags!=0)))return false;
     unsigned menu_kind=0,menu_target=0;
     if(has_menu && (!parse_integer(fields[10],menu_kind) || !parse_integer(fields[11],menu_target) ||
@@ -130,7 +134,8 @@ InputReplayError DeterministicInputReplay::load(
     if (!line.empty() && line.back() == '\r') {
         line.pop_back();
     }
-    const bool has_options = line == kInputReplayHeaderV8;
+    const bool has_movement_options = line == kInputReplayHeaderV9;
+    const bool has_options = has_movement_options || line == kInputReplayHeaderV8;
     const bool has_pause_menu = has_options || line == kInputReplayHeaderV7;
     const bool has_menu = has_pause_menu || line == kInputReplayHeaderV6;
     const bool has_actions = has_menu || line == kInputReplayHeaderV5;
@@ -149,7 +154,7 @@ InputReplayError DeterministicInputReplay::load(
             return InputReplayError::invalid_record;
         }
         InputReplayEvent event;
-        if (!parse_record(line, has_connection, has_pc, precise_stick, has_actions, has_menu, has_pause_menu, has_options, event)) {
+        if (!parse_record(line, has_connection, has_pc, precise_stick, has_actions, has_menu, has_pause_menu, has_options, has_movement_options, event)) {
             return InputReplayError::invalid_record;
         }
         if (!parsed.empty() && event.first_retrace < parsed.back().end_retrace) {
@@ -194,6 +199,40 @@ ControllerReplaySample DeterministicInputReplay::sample_by_poll(
 const std::vector<InputReplayEvent>& DeterministicInputReplay::events()
     const noexcept {
     return events_;
+}
+
+namespace {
+
+// Legacy aim modes 1 and 2 only occur in Controller Mapping recordings.
+bool controller_mapping_input(const ControllerReplaySample& sample) noexcept {
+    const bool legacy_aim = sample.pc_mode == 1U || sample.pc_mode == 2U;
+    return sample.buttons != 0U || sample.stick_x != 0 || sample.stick_y != 0 ||
+        sample.look_x != 0 || sample.look_y != 0 || legacy_aim;
+}
+
+}  // namespace
+
+bool ReplayModernControls::observe(const ControllerReplaySample& sample) noexcept {
+    // Modern devices record neutral flag-0 samples while waiting for release
+    // after a device change, so only real Controller Mapping input ends Modern.
+    bool next_active = active_;
+    ModernGroundMovement next_ground_movement = ground_movement_;
+    bool next_original_acceleration = original_acceleration_;
+    if ((sample.modern_flags & kModernActionsFlag) != 0U) {
+        next_active = true;
+        const bool run_toward_input = (sample.modern_flags & kModernRunTowardInputFlag) != 0U;
+        next_ground_movement = run_toward_input ? ModernGroundMovement::run_toward_input
+                                                : ModernGroundMovement::face_camera;
+        next_original_acceleration = (sample.modern_flags & kModernOriginalAccelerationFlag) != 0U;
+    } else if (sample.connected && controller_mapping_input(sample)) {
+        next_active = false;
+    }
+    const bool changed = next_active != active_ || next_ground_movement != ground_movement_ ||
+        next_original_acceleration != original_acceleration_;
+    active_ = next_active;
+    ground_movement_ = next_ground_movement;
+    original_acceleration_ = next_original_acceleration;
+    return changed;
 }
 
 }  // namespace jfg

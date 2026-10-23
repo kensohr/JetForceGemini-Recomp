@@ -186,6 +186,35 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR,int) {
       demand(ui.modern[0].pad_floyd_flight_invert_y,"controller reset restores original flight pitch");
       demand(ui.saveModern(flightProfile),"restore flight test profile");ui.modal("controllers");settle();click("action-mc-tab-advanced");
     }
+    // Ground movement is one saved per-player choice shown in the Movement card
+    // of both the controller and keyboard Advanced tabs.
+    {
+      const auto groundProfile=ui.modern[0];const auto otherGroundPlayer=ui.read("modern-controls-2.ini");
+      const auto inMovementCard=[&](const char* id){return ui.el("mc-movement-card")->GetInnerRML().find(id)!=std::string::npos;};
+      const auto selected=[&](const char* id){return ui.el(id)&&ui.el(id)->IsClassSet("selected");};
+      demand(groundProfile.ground_movement==jfg::ModernGroundMovement::run_toward_input,"ground movement defaults to running toward input");
+      demand(inMovementCard("action-mc-ground-run")&&inMovementCard("action-mc-ground-face-camera"),"controller Advanced Movement card shows ground movement");
+      demand(selected("action-mc-ground-run")&&!selected("action-mc-ground-face-camera"),"controller ground movement shows the default choice");
+      ui.el("mc-settings-scroll")->SetScrollTop(ui.el("mc-settings-scroll")->GetScrollHeight());settle();
+      pointerClick("action-mc-ground-face-camera");ui.loadModern();
+      demand(ui.modern[0].ground_movement==jfg::ModernGroundMovement::face_camera,"controller ground movement saves face the camera");
+      demand(selected("action-mc-ground-face-camera")&&!selected("action-mc-ground-run"),"controller ground movement reflects the saved choice");
+      capture("controller-ground-movement.tga");
+      demand(ui.read("modern-controls-2.ini")==otherGroundPlayer,"P1 ground movement preserves P2 profile");
+      ui.assignDevice(-3);settle();click("action-mc-tab-advanced");
+      demand(inMovementCard("action-mc-ground-run")&&selected("action-mc-ground-face-camera"),"keyboard Advanced shows the same saved ground movement");
+      pointerClick("action-mc-ground-run");ui.loadModern();
+      demand(ui.modern[0].ground_movement==jfg::ModernGroundMovement::run_toward_input&&selected("action-mc-ground-run"),"keyboard ground movement saves run toward input");
+      capture("keyboard-ground-movement.tga");
+      click("action-mc-ground-face-camera");click("action-mc-reset");click("action-mc-reset-confirm");ui.loadModern();
+      demand(ui.modern[0].ground_movement==jfg::ModernGroundMovement::run_toward_input,"keyboard Advanced reset restores run toward input");
+      ui.assignDevice(0);settle();click("action-mc-tab-advanced");
+      click("action-mc-ground-face-camera");click("action-mc-reset");click("action-mc-reset-confirm");ui.loadModern();
+      demand(ui.modern[0].ground_movement==jfg::ModernGroundMovement::run_toward_input,"controller Advanced reset restores run toward input");
+      click("action-mc-ground-face-camera");click("action-mc-tab-buttons");click("action-mc-reset");click("action-mc-reset-confirm");ui.loadModern();
+      demand(ui.modern[0].ground_movement==jfg::ModernGroundMovement::run_toward_input,"Restore modern defaults restores run toward input");
+      demand(ui.saveModern(groundProfile),"restore ground movement test profile");ui.modal("controllers");settle();click("action-mc-tab-advanced");
+    }
     // Explicit roll bindings and the automatic gesture preference use the same
     // persisted profile while keyboard and controller bindings stay independent.
     {

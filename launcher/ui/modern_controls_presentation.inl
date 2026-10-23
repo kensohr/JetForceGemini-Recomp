@@ -354,12 +354,18 @@
     const auto automaticRoll=modernSwitch("mc-automatic-roll","Automatic movement rolling",
       pcKeyboard()?"Roll with sideways movement keys while crouched or crawling. Turn off to use only your Roll left and Roll right bindings.":
         "Roll with sideways movement stick input while crouched or crawling. Turn off to use only your Roll left and Roll right bindings.",c.automatic_roll);
-    if(pcKeyboard())return "<div id=\"mc-settings-scroll\" class=\"mc-settings-scroll\"><div class=\"mc-settings-grid\"><section id=\"mc-movement-card\" class=\"mc-settings-card\"><div class=\"mc-section-title\">MOVEMENT</div>"+
+    const bool faceCamera=c.ground_movement==jfg::ModernGroundMovement::face_camera;
+    const auto groundMovement="<div class=\"mc-setting\"><strong>Ground movement</strong><div class=\"mc-segment\">"+
+      modernButton("mc-ground-run","Run toward input (original)",!faceCamera)+modernButton("mc-ground-face-camera","Face the camera (strafe)",faceCamera)+"</div><div class=\"mc-hint\">"+
+      std::string(faceCamera?"You always face the camera direction: sideways input strafes and back walks backward.":
+        "Your character turns and runs in the direction you push, relative to the camera, as in the original game.")+
+      " Aiming and crouching always face the camera.</div></div>";
+    if(pcKeyboard())return "<div id=\"mc-settings-scroll\" class=\"mc-settings-scroll\"><div class=\"mc-settings-grid\"><section id=\"mc-movement-card\" class=\"mc-settings-card\"><div class=\"mc-section-title\">MOVEMENT</div>"+groundMovement+
       modernSwitch("mc-original-acceleration","Original movement acceleration",
-        "Ease into movement and slow down gradually when releasing keys. Off gives immediate starts and stops. Top speed stays the same.",c.mouse_original_acceleration)+automaticRoll+"</section></div></div>";
+        "Face the camera only: ease into movement and slow down gradually when releasing keys. Off gives immediate starts and stops. Top speed stays the same. Run toward input always uses the original acceleration.",c.mouse_original_acceleration)+automaticRoll+"</section></div></div>";
     return "<div id=\"mc-settings-scroll\" class=\"mc-settings-scroll\"><div class=\"mc-settings-grid\"><div class=\"mc-settings-column\"><section class=\"mc-settings-card\"><div class=\"mc-section-title\">VERTICAL LOOK</div>"+
       modernRange("vertical","Vertical sensitivity",c.look.stick_vertical_sensitivity,10,300)+
-      modernSwitch("mc-floyd-flight-invert","Invert Floyd flight steering","Floyd missions: push up to fly down. Turn off to fly up.",c.pad_floyd_flight_invert_y)+"</section><section id=\"mc-movement-card\" class=\"mc-settings-card\"><div class=\"mc-section-title\">MOVEMENT</div>"+automaticRoll+"</section></div><div class=\"mc-settings-column\"><section class=\"mc-settings-card\"><div class=\"mc-section-title\">BINDING THRESHOLDS</div>"+
+      modernSwitch("mc-floyd-flight-invert","Invert Floyd flight steering","Floyd missions: push up to fly down. Turn off to fly up.",c.pad_floyd_flight_invert_y)+"</section><section id=\"mc-movement-card\" class=\"mc-settings-card\"><div class=\"mc-section-title\">MOVEMENT</div>"+groundMovement+automaticRoll+"</section></div><div class=\"mc-settings-column\"><section class=\"mc-settings-card\"><div class=\"mc-section-title\">BINDING THRESHOLDS</div>"+
       modernRange("axis","Button axis threshold",c.axis_threshold,1000,32000,"",true)+modernRange("trigger","Trigger threshold",c.trigger_threshold,1000,32000,"",true)+"</section></div></div></div>";
   }
   std::string modernHtml() {

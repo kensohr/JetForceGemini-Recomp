@@ -38,10 +38,32 @@ inline std::optional<ModernAction> modern_action(std::string_view id) {
     return {};
 }
 enum class ModernGlyphStyle { automatic=0, xbox=1, playstation=2 };
+// Non-aiming ground locomotion. Run toward input is the original game's
+// camera-relative running; face the camera is view-locked strafing.
+enum class ModernGroundMovement { run_toward_input=0, face_camera=1 };
+// Native player movement states (the control block's byte at +0x568).
+inline constexpr unsigned kMovementStateGround=0U;
+inline constexpr unsigned kMovementStateCrouch=2U;
+inline constexpr unsigned kMovementStateAirborne=3U;
+inline constexpr unsigned kMovementStateAim=10U;
+// Standing aim: pc_aim_movement's standing channels.
+inline constexpr unsigned kMovementStateStandingAim=11U;
+// Whether the Modern shoulder adapter locks the body to the view direction
+// in this native movement state. Run toward input leaves normal ground
+// movement and airborne body yaw to the native handler; aim and crouch stay
+// view-locked.
+inline bool modern_view_locked_movement(ModernGroundMovement ground,unsigned movement_state,bool air_aim) {
+    if(ground==ModernGroundMovement::face_camera)return true;
+    if(movement_state==kMovementStateGround)return false;
+    if(movement_state==kMovementStateAirborne)return air_aim;
+    return true;
+}
 struct ModernControlsConfig {
     bool enabled = false;
     bool aim_toggle = false;
     bool automatic_roll = true;
+    // Shared by keyboard/mouse and controller, like automatic_roll.
+    ModernGroundMovement ground_movement = ModernGroundMovement::run_toward_input;
     bool pad_floyd_flight_invert_y = true;
     bool mouse_original_acceleration = false;
     ModernGlyphStyle glyph_style = ModernGlyphStyle::automatic;
@@ -60,17 +82,20 @@ struct ModernControlsConfig {
         PcInputConfig c;c.modern=c.mouse_aim=c.dual_stick=1;return c;
     }();
 };
-inline constexpr std::array<std::string_view,13> kModernSettings{
+inline constexpr int kModernControlsSchemaVersion=8;
+inline constexpr std::array<std::string_view,14> kModernSettings{
     "version","enabled","aim_toggle","glyph_style","movement_stick",
-    "movement_deadzone","axis_threshold","trigger_threshold","mouse_scope_sensitivity","pad_scope_sensitivity","mouse_original_acceleration","roll.automatic","pad_floyd_flight_invert_y"};
+    "movement_deadzone","axis_threshold","trigger_threshold","mouse_scope_sensitivity","pad_scope_sensitivity","mouse_original_acceleration","roll.automatic","pad_floyd_flight_invert_y",
+    "movement.ground"};
 // Modern keyboard navigation follows the movement keys; arrow keys are not
 // bindings. Keep the persisted action IDs for controller and profile compatibility.
 inline constexpr bool modern_arrow_key(int key) { return key>=37 && key<=40; }
 inline std::string serialize_modern_controls(const ModernControlsConfig &c) {
     std::string out;
-    const std::array<int,kModernSettings.size()> values{7,int(c.enabled),int(c.aim_toggle),int(c.glyph_style),
+    const std::array<int,kModernSettings.size()> values{kModernControlsSchemaVersion,int(c.enabled),int(c.aim_toggle),int(c.glyph_style),
         c.movement_stick,c.movement_deadzone,c.axis_threshold,c.trigger_threshold,
-        c.mouse_scope_sensitivity,c.pad_scope_sensitivity,int(c.mouse_original_acceleration),int(c.automatic_roll),int(c.pad_floyd_flight_invert_y)};
+        c.mouse_scope_sensitivity,c.pad_scope_sensitivity,int(c.mouse_original_acceleration),int(c.automatic_roll),int(c.pad_floyd_flight_invert_y),
+        int(c.ground_movement)};
     for(std::size_t i=0;i<values.size();++i)
         out+=std::string(kModernSettings[i])+"="+std::to_string(values[i])+"\n";
     for(std::size_t i=0;i<kModernActionCount;++i) {
@@ -156,12 +181,18 @@ inline bool parse_modern_controls(std::string_view text,ModernControlsConfig &re
         if(seen[12])return false;
         values[12]=1;seen[12]=true;
     }
+    // Version 8 adds the shared Ground movement choice. Older profiles get the
+    // original game's run-toward-input locomotion.
+    if(values[0]>=1 && values[0]<=7) {
+        if(seen[13])return false;
+        values[13]=static_cast<int>(ModernGroundMovement::run_toward_input);seen[13]=true;
+    }
     for(bool present:seen)if(!present)return false;
-    if((values[0]!=1 && values[0]!=2 && values[0]!=3 && values[0]!=4 && values[0]!=5 && values[0]!=6 && values[0]!=7) || values[1]<0 || values[1]>1 || values[2]<0 || values[2]>1 ||
+    if(values[0]<1 || values[0]>kModernControlsSchemaVersion || values[1]<0 || values[1]>1 || values[2]<0 || values[2]>1 ||
        values[3]<0 || values[3]>2 || values[4]<0 || values[4]>1 ||
        values[5]<0 || values[5]>30000 || values[6]<1000 || values[6]>32000 ||
        values[7]<1000 || values[7]>32000 || values[8]<10 || values[8]>300 ||
-       values[9]<10 || values[9]>300 || values[10]<0 || values[10]>1 || values[11]<0 || values[11]>1 || values[12]<0 || values[12]>1 || !parse_pc_input(look,c.look) ||
+       values[9]<10 || values[9]>300 || values[10]<0 || values[10]>1 || values[11]<0 || values[11]>1 || values[12]<0 || values[12]>1 || values[13]<0 || values[13]>1 || !parse_pc_input(look,c.look) ||
        c.look.modern!=1 || c.look.mouse_aim!=1 || c.look.dual_stick!=1)return false;
     // Only migrate the old default Back binding; preserve custom controls and
     // avoid taking Q from a menu or movement action. New profiles expose Q in UI.
@@ -176,6 +207,7 @@ inline bool parse_modern_controls(std::string_view text,ModernControlsConfig &re
     c.movement_deadzone=values[5];c.axis_threshold=values[6];c.trigger_threshold=values[7];
     c.mouse_scope_sensitivity=values[8];c.pad_scope_sensitivity=values[9];
     c.mouse_original_acceleration=values[10]!=0;c.automatic_roll=values[11]!=0;c.pad_floyd_flight_invert_y=values[12]!=0;
+    c.ground_movement=static_cast<ModernGroundMovement>(values[13]);
     // Retire arrow bindings from saved modern profiles without changing other
     // choices, including shared E actions, inversion and controller mappings.
     for(auto& key:c.keys)if(modern_arrow_key(key))key=0;
@@ -326,6 +358,25 @@ inline constexpr std::array<std::uint32_t,9> kExpertGuestTable{
     0x2000,0x4000,0x8000,0x8,0x4,0x2,0x1,0x8,0x4};
 // Replay flag bit 7 selects action semantics. Bits 0..2 hold scope actions.
 inline constexpr std::uint8_t kModernActionsFlag=0x80;
+// Bits 0..2: held scope cycle, increase and decrease actions.
+inline constexpr std::uint8_t kModernScopeActionFlags=0x07;
+// v9+: player 1 was on Ground movement Run toward input for this poll; a
+// clear bit means Face the camera. Only valid together with kModernActionsFlag.
+inline constexpr std::uint8_t kModernRunTowardInputFlag=0x20;
+// v9+: player 1 had Original movement acceleration on for this poll. It records
+// the option itself, on any pc_mode; only valid together with kModernActionsFlag.
+inline constexpr std::uint8_t kModernOriginalAccelerationFlag=0x40;
+// The v9 recorder's modern_flags for one poll: the live flags plus player 1's
+// effective Ground movement and Original movement acceleration option.
+// Samples without Modern identity stay unchanged.
+inline std::uint8_t modern_recorded_flags(std::uint8_t live_flags,const ModernControlsConfig &player1) {
+    const bool modern_sample=(live_flags&kModernActionsFlag)!=0;
+    if(!modern_sample)return live_flags;
+    std::uint8_t recorded=live_flags;
+    if(player1.ground_movement==ModernGroundMovement::run_toward_input)recorded|=kModernRunTowardInputFlag;
+    if(player1.mouse_original_acceleration)recorded|=kModernOriginalAccelerationFlag;
+    return recorded;
+}
 inline std::uint8_t modern_scope_flags(std::uint32_t held) {
     return static_cast<std::uint8_t>(kModernActionsFlag |
         ((held&modern_bit(ModernAction::scope_cycle))?1:0) |

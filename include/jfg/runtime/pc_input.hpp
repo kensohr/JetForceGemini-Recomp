@@ -300,6 +300,29 @@ inline PcMoveVelocity pc_shoulder_movement(int x,int y) {
   if(length>65.0F){sx*=65.0F/length;sy*=65.0F/length;}
   return {sx/16.0F,-sy/16.0F};
 }
+// Native post-deadzone stick axes (guest 0x800F6DAC/0x800F6DB0).
+struct PcStickAxes { int x=0,y=0; };
+// The native ground handler turns stick input into a travel direction
+// relative to the native camera yaw. Under camera-relative running the
+// travel must instead be relative to the view direction, which the native
+// camera can lag. Rotate the axes by that difference so the native handler,
+// unchanged, runs toward the input as seen from the view.
+inline PcStickAxes pc_camera_relative_stick(PcStickAxes input,int view_yaw,int native_camera_yaw) {
+  const int difference=pc_wrap_angle(pc_shoulder_camera_yaw(view_yaw)-native_camera_yaw);
+  if(difference==0)return input;
+  const double angle=static_cast<double>(difference)*6.283185307179586/65536.0;
+  const double sine=std::sin(angle),cosine=std::cos(angle);
+  const double x=input.x,y=input.y;
+  PcStickAxes rotated{static_cast<int>(std::lround(x*cosine+y*sine)),
+                      static_cast<int>(std::lround(y*cosine-x*sine))};
+  // Rounding must not push the axes past the native radial speed cap.
+  const double limit=std::hypot(x,y);
+  while(std::hypot(static_cast<double>(rotated.x),static_cast<double>(rotated.y))>limit) {
+    auto& larger=std::abs(rotated.x)>=std::abs(rotated.y)?rotated.x:rotated.y;
+    larger-=larger>0?1:-1;
+  }
+  return rotated;
+}
 // The native selector assumes the body turns into motion. Modern ground
 // movement can reverse locally without that turn. Correct only locomotion
 // requests; the caller resolves weapon variants through the native clip table.
@@ -473,6 +496,38 @@ struct PcCameraBoom {
     return at(selected);
   }
 };
+// The camera under camera-relative running. Like the native follow camera
+// (0x8002CF6C default path) it is dragged by the character: each update its
+// yaw is the bearing from the focus to where the camera was last resolved,
+// plus look input. None of the native easings apply. Yaws use the camera
+// convention (cam+0, pc_orbit_point).
+struct PcLeashCamera {
+  bool following=false;
+  PcOrbitPoint focus{},camera{};
+  int yaw=0;
+  // view_camera_yaw is the view direction this update: the last camera yaw
+  // plus this update's look input.
+  int follow_yaw(PcOrbitPoint next_focus,int view_camera_yaw) const {
+    if(!following)return view_camera_yaw;
+    // Only the character's travel drags the camera. Scenery can leave the
+    // resolved position slightly off its yaw; re-reading that bearing while
+    // standing still would turn the camera on its own.
+    constexpr float kStillTravel=0.01F;
+    const float travel=std::hypot(next_focus.x-focus.x,next_focus.z-focus.z);
+    if(!(travel>=kStillTravel))return view_camera_yaw;
+    const float dx=camera.x-next_focus.x,dz=camera.z-next_focus.z;
+    // A camera (almost) straight overhead has no meaningful bearing.
+    constexpr float kMinimumReach=1.0F;
+    if(!(std::hypot(dx,dz)>=kMinimumReach))return view_camera_yaw;
+    constexpr float units_per_radian=65536.0F/6.283185307179586F;
+    const int bearing=static_cast<int>(std::lround(std::atan2(dx,-dz)*units_per_radian));
+    const int look=pc_wrap_angle(view_camera_yaw-yaw);
+    return pc_wrap_angle(bearing+look);
+  }
+  void resolved(PcOrbitPoint resolved_focus,PcOrbitPoint resolved_camera,int resolved_yaw) {
+    following=true;focus=resolved_focus;camera=resolved_camera;yaw=resolved_yaw;
+  }
+};
 struct PcShoulder {
   PcCameraBoom camera_boom{};
   PcMoveVelocity movement_before_update{};
@@ -480,6 +535,9 @@ struct PcShoulder {
   int movement_before_yaw=0;
   bool active=false,aiming=false,air_aim=false,landing_recovery=false;
   bool water_origin=false;
+  // This update's normal camera is the leash camera (camera-relative running).
+  bool leash_camera=false;
+  PcLeashCamera leash{};
   std::uint32_t actor=0,control=0;
   std::uint64_t retrace=0;
   int yaw=0,pitch=0;
