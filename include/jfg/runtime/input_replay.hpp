@@ -84,4 +84,18 @@ private:
     std::vector<InputReplayEvent> events_;
 };
 
+// Player 1's Modern Controls state while a replay is loaded. It is derived
+// from the replayed samples so the replaying machine's profile cannot change
+// how a recording plays back.
+class ReplayModernControls final {
+public:
+    [[nodiscard]] bool active() const noexcept { return active_; }
+
+    // Returns true when the sample changes the held state.
+    bool observe(const ControllerReplaySample& sample) noexcept;
+
+private:
+    bool active_ = false;
+};
+
 }  // namespace jfg

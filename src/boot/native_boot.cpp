@@ -1802,6 +1802,7 @@ struct State : JfgOriginalTimingFast {
   bool latched_controller_connected = true;
   jfg::DeterministicInputReplay input_replay;
   bool input_replay_loaded = false;
+  jfg::ReplayModernControls replay_modern_controls;
   bool input_replay_by_poll = false;
   bool input_replay_recorded_time = false;
   bool input_replay_gameplay_time = false, replay_gameplay_clock_ready = false;
@@ -3228,6 +3229,25 @@ public:
         static_cast<std::uint64_t>(elapsed),delta,valid?1U:0U});
   }
 };
+// A style change restarts aim, scope and pointer state and holds input until release.
+void set_modern_controls_active(State &state,bool active) {
+  if(active==state.modern_controls_active)return;
+  state.modern_controls_active=active;state.pc_aim.fill({});
+  for(auto &latch:state.modern_aim_latch)latch.reset();
+  for(auto &scope:state.modern_scope_zoom)scope.reset();
+  state.pc_mouse.clear();state.pc_wheel.clear();state.pc_wheel_key=0;
+  const bool was_captured=state.pc_mouse_captured.exchange(false);
+  if(was_captured && state.play_mode && state.native_window) {
+    ClipCursor(nullptr);SetCursor(LoadCursorW(nullptr,MAKEINTRESOURCEW(32512)));
+  }
+  (void)state.controller_input_gate.blocked(true,state.controller_ports.samples);
+}
+// A replay decides player 1's style from its samples; players 2-4 replay blank.
+void apply_replay_modern_controls(State &state) {
+  const bool modern=state.replay_modern_controls.active();
+  for(std::size_t p=0;p<state.modern_controls.size();++p)state.modern_controls[p].enabled=p==0U && modern;
+  set_modern_controls_active(state,modern);
+}
 void reload_controller_ports(State &state) {
   const auto now = std::chrono::steady_clock::now();
   if (now - state.controller_config_check < std::chrono::milliseconds(250))
@@ -3247,13 +3267,17 @@ void reload_controller_ports(State &state) {
     const auto& modern=(*files)[p*3U];
     if(modern.status==jfg::ConfigFileValue::Status::ready) {
       auto candidate=state.modern_controls[p];
-      if(jfg::parse_modern_controls(modern.text,candidate) &&
+      const bool parsed=jfg::parse_modern_controls(modern.text,candidate);
+      // The live profile must not change a replay's recorded style.
+      if(state.input_replay_loaded)candidate.enabled=state.modern_controls[p].enabled;
+      if(parsed &&
          jfg::serialize_modern_controls(candidate)!=jfg::serialize_modern_controls(state.modern_controls[p])) {
         state.modern_controls[p]=candidate;state.modern_aim_latch[p].reset();
         state.modern_scope_zoom[p].reset();state.pc_device_release[p]={};state.pc_device_ready[p]=false;
         (void)state.controller_input_gate.blocked(true,state.controller_ports.samples);
       }
-    } else if(modern.status==jfg::ConfigFileValue::Status::missing && state.modern_controls[p].enabled) {
+    } else if(modern.status==jfg::ConfigFileValue::Status::missing && state.modern_controls[p].enabled &&
+              !state.input_replay_loaded) {
       state.modern_controls[p].enabled=false;state.modern_aim_latch[p].reset();state.modern_scope_zoom[p].reset();
       state.pc_device_release[p]={};state.pc_device_ready[p]=false;
       (void)state.controller_input_gate.blocked(true,state.controller_ports.samples);
@@ -3272,17 +3296,7 @@ void reload_controller_ports(State &state) {
   // The selected style is the only opt-in. The obsolete profile switch is ignored.
   const bool pc_enabled=std::any_of(state.modern_controls.begin(),state.modern_controls.end(),
     [](const auto& config){return config.enabled;});
-  if(pc_enabled!=state.modern_controls_active) {
-    state.modern_controls_active=pc_enabled;state.pc_aim.fill({});
-    for(auto &latch:state.modern_aim_latch)latch.reset();
-    for(auto &scope:state.modern_scope_zoom)scope.reset();
-    state.pc_mouse.clear();state.pc_wheel.clear();state.pc_wheel_key=0;
-    const bool was_captured=state.pc_mouse_captured.exchange(false);
-    if(was_captured && state.play_mode && state.native_window) {
-      ClipCursor(nullptr);SetCursor(LoadCursorW(nullptr,MAKEINTRESOURCEW(32512)));
-    }
-    (void)state.controller_input_gate.blocked(true,state.controller_ports.samples);
-  }
+  set_modern_controls_active(state,pc_enabled);
 
 }
 jfg::ControllerPortSample sample_keyboard_port(const State &state,std::size_t port) {
@@ -3625,6 +3639,10 @@ void sample_live_controller(State &state) noexcept {
       replay = state.input_replay_by_poll
           ? state.input_replay.sample_by_poll(state.controller_samples)
           : state.input_replay.sample_at(state.vi_retraces);
+    }
+    if(state.replay_modern_controls.observe(replay)) {
+      state.gameplay_trace.event("replay-modern-controls",{state.vi_retraces,state.replay_modern_controls.active()?1U:0U});
+      apply_replay_modern_controls(state);
     }
     if(state.modern_controls_active)state.pc_frames[0]=replay;
     menu_kind=replay.menu_kind;menu_target=replay.menu_target;
@@ -13928,6 +13946,8 @@ int run_child(const char *path, const unsigned retrace_target,
     }
     state.input_replay_loaded = true;
     state.input_replay_event_count = state.input_replay.events().size();
+    // Discard the boot-time profile style before any guest code reads it.
+    apply_replay_modern_controls(state);
   }
   std::free(replay_path);
   // Bounded replay fixture for the same input-suspension path used by focus

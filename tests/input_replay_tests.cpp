@@ -1,4 +1,5 @@
 #include "jfg/runtime/input_replay.hpp"
+#include "jfg/runtime/modern_controls.hpp"
 #include "jfg/runtime/modern_roll.hpp"
 
 #include <atomic>
@@ -315,6 +316,90 @@ void test_rejects_invalid_records() {
     }
 }
 
+void test_replay_modern_controls_follow_recording() {
+    const TemporaryReplay recording("jfg-phase8-input-v8\n"
+        "1,2,1,0,0,0,0,0,0,0,0,0\n"
+        "2,3,1,0,0,0,3,0,0,128,0,0\n");
+    jfg::DeterministicInputReplay replay;
+    check(jfg::DeterministicInputReplay::load(recording.path(),replay)==jfg::InputReplayError::none,
+        "Modern replay recording loads");
+    jfg::ReplayModernControls modern;
+    check(!modern.active(),"replayed Modern Controls start off");
+    check(!modern.observe(replay.sample_at(1)) && !modern.active(),"a neutral Controller Mapping sample keeps Modern off");
+    check(modern.observe(replay.sample_at(2)) && modern.active(),"a recorded Modern sample turns Modern on");
+}
+
+void test_replay_modern_controls_hold_until_mapping_input() {
+    // Device-release waits record neutral flag-0 samples; a disconnect records none.
+    const TemporaryReplay recording("jfg-phase8-input-v8\n"
+        "1,2,1,0,0,0,3,0,0,128,0,0\n"
+        "2,3,1,0,0,0,0,0,0,0,0,0\n"
+        "3,4,0,0,0,0,0,0,0,0,0,0\n"
+        "4,5,1,0,0,0,3,0,0,128,0,0\n");
+    jfg::DeterministicInputReplay replay;
+    check(jfg::DeterministicInputReplay::load(recording.path(),replay)==jfg::InputReplayError::none,
+        "Modern recording with release wait and disconnect loads");
+    jfg::ReplayModernControls modern;
+    (void)modern.observe(replay.sample_at(1));
+    check(!modern.observe(replay.sample_at(2)) && modern.active(),"a neutral flag-0 sample keeps Modern on");
+    check(!modern.observe(replay.sample_at(3)) && modern.active(),"a disconnected sample keeps Modern on");
+
+    const TemporaryReplay mapping_input("jfg-phase8-input-v8\n"
+        "1,2,1,8000,0,0,0,0,0,0,0,0\n"
+        "2,3,1,0,0,12,0,0,0,0,0,0\n"
+        "3,4,1,0,0,0,3,0,-5,0,0,0\n"
+        "4,5,1,0,0,0,1,0,0,0,0,0\n"
+        "5,6,1,0,0,0,2,0,0,0,0,0\n");
+    check(jfg::DeterministicInputReplay::load(mapping_input.path(),replay)==jfg::InputReplayError::none,
+        "Controller Mapping input samples load");
+    const char* const descriptions[]{"buttons","stick","look","legacy aim mode 1","legacy aim mode 2"};
+    for(std::uint64_t retrace=1;retrace<=5;++retrace) {
+        jfg::ReplayModernControls switched;
+        (void)switched.observe(jfg::ControllerReplaySample{true,0,0,0,3,0,0,jfg::kModernActionsFlag});
+        check(switched.observe(replay.sample_at(retrace)) && !switched.active(),
+            std::string("Controller Mapping ")+descriptions[retrace-1]+" turns Modern off");
+    }
+}
+
+std::string replay_modern_trace(const jfg::DeterministicInputReplay& replay) {
+    jfg::ReplayModernControls modern;
+    std::string trace;
+    for(std::uint64_t poll=0;poll<replay.events().size();++poll) {
+        (void)modern.observe(replay.sample_by_poll(poll));
+        trace+=modern.active()?'M':'C';
+    }
+    return trace;
+}
+
+void test_replay_modern_controls_switch_mid_recording() {
+    const TemporaryReplay recording("jfg-phase8-input-v8\n"
+        "1,2,1,8000,0,0,0,0,0,0,0,0\n"
+        "2,3,1,0,0,0,0,0,0,0,0,0\n"
+        "3,4,1,0,40,0,3,0,0,128,0,0\n"
+        "4,5,1,0,0,0,0,0,0,0,0,0\n"
+        "5,6,1,0,0,30,0,0,0,0,0,0\n"
+        "6,7,1,0,0,0,0,0,0,0,0,0\n"
+        "7,8,1,0,0,0,3,0,0,128,0,0\n");
+    jfg::DeterministicInputReplay replay;
+    check(jfg::DeterministicInputReplay::load(recording.path(),replay,jfg::InputReplayOrder::recorded_poll)==
+        jfg::InputReplayError::none,"mixed-style recording loads");
+    check(replay_modern_trace(replay)=="CCMMCCM","style switches mid-recording follow the recorded samples both ways");
+}
+
+void test_replay_modern_controls_old_formats_stay_off() {
+    for(const std::string_view contents:{
+        std::string_view("jfg-phase8-input-v1\n1,2,1000,12,-34\n"),
+        std::string_view("jfg-phase8-input-v2\n1,2,1,8000,12,-34\n2,3,1,0,0,0\n"),
+        std::string_view("jfg-phase8-input-v3\n1,2,1,0,0,0,3,12,0\n2,3,1,0010,0,0,1,0,0\n"),
+        std::string_view("jfg-phase8-input-v4\n1,2,1,2010,80,-40,5,6144,-18432\n2,3,1,0,0,0,0,0,0\n")}) {
+        const TemporaryReplay recording(contents);
+        jfg::DeterministicInputReplay replay;
+        check(jfg::DeterministicInputReplay::load(recording.path(),replay,jfg::InputReplayOrder::recorded_poll)==
+            jfg::InputReplayError::none,"pre-Modern recording loads");
+        check(replay_modern_trace(replay).find('M')==std::string::npos,"v1-v4 recordings never turn Modern on");
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -329,5 +414,9 @@ int main() {
     test_poll_replay_eof_is_neutral();
     test_repeated_poll_records();
     test_rejects_invalid_records();
+    test_replay_modern_controls_follow_recording();
+    test_replay_modern_controls_hold_until_mapping_input();
+    test_replay_modern_controls_switch_mid_recording();
+    test_replay_modern_controls_old_formats_stay_off();
     return failures == 0 ? 0 : 1;
 }

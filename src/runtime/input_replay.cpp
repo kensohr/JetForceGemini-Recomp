@@ -1,4 +1,5 @@
 #include "jfg/runtime/input_replay.hpp"
+#include "jfg/runtime/modern_controls.hpp"
 #include "jfg/runtime/modern_roll.hpp"
 
 #include <algorithm>
@@ -194,6 +195,31 @@ ControllerReplaySample DeterministicInputReplay::sample_by_poll(
 const std::vector<InputReplayEvent>& DeterministicInputReplay::events()
     const noexcept {
     return events_;
+}
+
+namespace {
+
+// Legacy aim modes 1 and 2 only occur in Controller Mapping recordings.
+bool controller_mapping_input(const ControllerReplaySample& sample) noexcept {
+    const bool legacy_aim = sample.pc_mode == 1U || sample.pc_mode == 2U;
+    return sample.buttons != 0U || sample.stick_x != 0 || sample.stick_y != 0 ||
+        sample.look_x != 0 || sample.look_y != 0 || legacy_aim;
+}
+
+}  // namespace
+
+bool ReplayModernControls::observe(const ControllerReplaySample& sample) noexcept {
+    // Modern devices record neutral flag-0 samples while waiting for release
+    // after a device change, so only real Controller Mapping input ends Modern.
+    bool next = active_;
+    if ((sample.modern_flags & kModernActionsFlag) != 0U) {
+        next = true;
+    } else if (sample.connected && controller_mapping_input(sample)) {
+        next = false;
+    }
+    const bool changed = next != active_;
+    active_ = next;
+    return changed;
 }
 
 }  // namespace jfg
