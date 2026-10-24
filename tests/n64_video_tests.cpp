@@ -68,31 +68,31 @@ int main() {
   constexpr unsigned counts_up_to_4 = 1U | 2U | 4U;
   constexpr unsigned counts_up_to_2 = 1U | 2U;
   constexpr unsigned counts_8_without_4 = 1U | 8U;
-  check(n64_video::msaa_sample_count(counts_up_to_8, true) == 8,
+  check(n64_video::msaa_sample_count({counts_up_to_8, true}) == 8,
         "the fallback picks 8x when the device supports it");
-  check(n64_video::msaa_sample_count(counts_up_to_4, true) == 4,
+  check(n64_video::msaa_sample_count({counts_up_to_4, true}) == 4,
         "the fallback picks 4x without 8x");
-  check(n64_video::msaa_sample_count(counts_up_to_2, true) == 1,
+  check(n64_video::msaa_sample_count({counts_up_to_2, true}) == 1,
         "the fallback turns MSAA off without 4x or 8x");
-  check(n64_video::msaa_sample_count(counts_8_without_4, true) == 8,
+  check(n64_video::msaa_sample_count({counts_8_without_4, true}) == 8,
         "the fallback needs only 8x itself for 8x");
-  check(n64_video::msaa_sample_count(counts_up_to_8, false) == 1,
+  check(n64_video::msaa_sample_count({counts_up_to_8, false}) == 1,
         "the fallback turns MSAA off without custom sample locations");
 
   Rt64UserConfiguration limited_to_4 = original;
-  check(n64_video::limit_msaa_to_device(limited_to_4, counts_up_to_4, true) == 4 &&
+  check(n64_video::limit_msaa_to_device(limited_to_4, {counts_up_to_4, true}) == 4 &&
             limited_to_4.antialiasing == Antialiasing::MSAA4X,
         "limiting to the device lowers 8x to 4x");
   Rt64UserConfiguration limited_to_none = original;
-  check(n64_video::limit_msaa_to_device(limited_to_none, counts_up_to_2, true) == 1 &&
+  check(n64_video::limit_msaa_to_device(limited_to_none, {counts_up_to_2, true}) == 1 &&
             limited_to_none.antialiasing == Antialiasing::None,
         "limiting to the device turns MSAA off without 4x");
   Rt64UserConfiguration kept_8 = original;
-  check(n64_video::limit_msaa_to_device(kept_8, counts_up_to_8, true) == 8 &&
+  check(n64_video::limit_msaa_to_device(kept_8, {counts_up_to_8, true}) == 8 &&
             kept_8.antialiasing == Antialiasing::MSAA8X,
         "limiting to the device keeps a supported 8x");
   Rt64UserConfiguration not_requested = original_off;
-  check(n64_video::limit_msaa_to_device(not_requested, counts_up_to_8, true) == 1 &&
+  check(n64_video::limit_msaa_to_device(not_requested, {counts_up_to_8, true}) == 1 &&
             not_requested.antialiasing == Antialiasing::None,
         "limiting to the device leaves MSAA off when it wasn't requested");
 

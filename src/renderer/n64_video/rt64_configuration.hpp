@@ -4,12 +4,27 @@
 
 namespace n64_video {
 
-// Applies the options to RT64's user configuration and makes them the active
-// options for the patched VI pass. Call it before RT64::Application::setup,
-// which reads the configuration once.
+// RT64's anti-aliasing setting for an MSAA sample count this core picks: 8, 4
+// or 1 (MSAA off).
 //
 // UserConfiguration is RT64::UserConfiguration. It is a template parameter so
 // this header needs no RT64 include path and can be tested without RT64.
+template <class UserConfiguration>
+typename UserConfiguration::Antialiasing rt64_antialiasing(unsigned sample_count) {
+    using Antialiasing = typename UserConfiguration::Antialiasing;
+    switch (sample_count) {
+    case msaa_preferred_sample_count:
+        return Antialiasing::MSAA8X;
+    case msaa_fallback_sample_count:
+        return Antialiasing::MSAA4X;
+    default:
+        return Antialiasing::None;
+    }
+}
+
+// Applies the options to RT64's user configuration and makes them the active
+// options for the patched VI pass. Call it before RT64::Application::setup,
+// which reads the configuration once.
 template <class UserConfiguration>
 void apply_to_rt64(const VideoOptions &options, UserConfiguration &configuration) {
     active_options() = options;
@@ -22,7 +37,8 @@ void apply_to_rt64(const VideoOptions &options, UserConfiguration &configuration
     if (options.anti_aliasing == AntiAliasing::msaa) {
         // The VI anti-aliases with 8 coverage sub-samples, so ask for 8x.
         // limit_msaa_to_device lowers it if the device can't do 8x.
-        configuration.antialiasing = UserConfiguration::Antialiasing::MSAA8X;
+        configuration.antialiasing =
+            rt64_antialiasing<UserConfiguration>(msaa_preferred_sample_count);
     }
 }
 
@@ -33,25 +49,11 @@ void apply_to_rt64(const VideoOptions &options, UserConfiguration &configuration
 // doesn't notice missing sample locations, which leaves the configuration
 // claiming a count it doesn't render.
 template <class UserConfiguration>
-unsigned limit_msaa_to_device(UserConfiguration &configuration,
-                              unsigned supported_sample_counts,
-                              bool sample_locations_supported) {
-    using Antialiasing = typename UserConfiguration::Antialiasing;
-    if (configuration.antialiasing == Antialiasing::None)
+unsigned limit_msaa_to_device(UserConfiguration &configuration, MsaaSupport support) {
+    if (configuration.antialiasing == UserConfiguration::Antialiasing::None)
         return msaa_off_sample_count;
-    const unsigned sample_count =
-        msaa_sample_count(supported_sample_counts, sample_locations_supported);
-    switch (sample_count) {
-    case msaa_preferred_sample_count:
-        configuration.antialiasing = Antialiasing::MSAA8X;
-        break;
-    case msaa_fallback_sample_count:
-        configuration.antialiasing = Antialiasing::MSAA4X;
-        break;
-    default:
-        configuration.antialiasing = Antialiasing::None;
-        break;
-    }
+    const unsigned sample_count = msaa_sample_count(support);
+    configuration.antialiasing = rt64_antialiasing<UserConfiguration>(sample_count);
     return sample_count;
 }
 

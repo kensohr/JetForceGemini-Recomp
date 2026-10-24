@@ -1,5 +1,7 @@
 // Video output card of the RmlUi video settings page. Kept apart from
-// video_settings_ui_tests.cpp so upstream's test file stays unchanged.
+// video_settings_ui_tests.cpp so upstream's test file stays unchanged. The
+// helpers below copy that file's: upstream's UI tests each define their own,
+// and sharing them would mean editing upstream's file to include a header.
 // Usage: jfg_video_output_ui_tests.exe <new-artifact-directory> [--no-captures].
 #include "../native_ui.cpp"
 #include <stdexcept>
