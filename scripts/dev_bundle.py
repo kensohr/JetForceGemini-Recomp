@@ -302,7 +302,7 @@ def add_bundle_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def jfg_root() -> Path:
-    """Return %LOCALAPPDATA%\JFG, the root all local build output lives under."""
+    r"""Return %LOCALAPPDATA%\JFG, the root all local build output lives under."""
     local = os.environ.get("LOCALAPPDATA")
     if not local:
         raise ValueError("LOCALAPPDATA is unavailable, so the development bundle can't be found.")
