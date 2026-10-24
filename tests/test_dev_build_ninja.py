@@ -6,7 +6,9 @@ import unittest
 from pathlib import Path
 
 from scripts.dev_build import (
+    GENERATION_JOBS,
     GeneratedCode,
+    GenerateSettings,
     WorkspaceState,
     argument_parser,
     build_command,
@@ -14,6 +16,7 @@ from scripts.dev_build import (
     configure_arguments,
     parse_environment_listing,
     plan_build,
+    run_generator,
     runtime_executable,
     visual_studio_tools,
 )
@@ -71,6 +74,21 @@ class JobsTests(unittest.TestCase):
         command = build_command("cmake", BUILD, 12)
         self.assertEqual(command[command.index("--parallel") + 1], "12")
         self.assertIn("jfg-native-boot", command)
+
+    def test_generation_uses_its_own_parallelism_not_the_build_jobs(self) -> None:
+        # Like build_from_rom.py's default: --jobs is for cmake --build only.
+        commands = []
+
+        class RecordingRunner:
+            def run(self, name: str, command: list[str], **options: object) -> None:
+                commands.append(command)
+
+        settings = GenerateSettings(rom=Path("/roms/game.z64"), dependencies=DEPENDENCIES, distro="Ubuntu-24.04",
+                                    timeout_seconds=60)
+        run_generator(RecordingRunner(), Path("/store/key.tmp-1"), settings)
+        command = commands[0]
+        self.assertEqual(command[command.index("--jobs") + 1], str(GENERATION_JOBS))
+        self.assertEqual(GENERATION_JOBS, min(os.cpu_count() or 4, 8))
 
     def test_changing_jobs_does_not_reconfigure(self) -> None:
         # Configure arguments don't depend on jobs, so a run with other jobs

@@ -47,6 +47,8 @@ STATE_FILE_NAME = "dev-build.json"
 BUILD_TARGET = "jfg-native-boot"
 MAX_JOBS = 32
 DEFAULT_JOBS = min(os.cpu_count() or 4, MAX_JOBS)  # one per logical core
+# generate_from_rom.py's parallelism, as build_from_rom.py passes it by default; --jobs is for cmake --build only.
+GENERATION_JOBS = min(os.cpu_count() or 4, 8)
 DEV_GENERATOR = "Ninja"
 DEV_CACHE_FILE = ROOT / "cmake" / "dev_build.cmake"
 DEFAULT_GENERATION_TIMEOUT_SECONDS = 3600
@@ -437,7 +439,6 @@ class GenerateSettings:
     dependencies: Path
     distro: str
     timeout_seconds: int
-    jobs: int
 
 
 def run_generator(runner: StepRunner, workspace: Path, settings: GenerateSettings) -> None:
@@ -446,7 +447,7 @@ def run_generator(runner: StepRunner, workspace: Path, settings: GenerateSetting
                str(settings.timeout_seconds) + "s", "python3",
                wsl_path(ROOT / "scripts/generate_from_rom.py"), "--rom", wsl_path(settings.rom),
                "--workspace", wsl_path(workspace), "--dependency-root", wsl_path(settings.dependencies),
-               "--jobs", str(settings.jobs)])
+               "--jobs", str(GENERATION_JOBS)])
 
 
 STORE_OUTCOME_MESSAGES = {
@@ -569,7 +570,7 @@ def main() -> int:
     with runner.step("dependencies"):
         prepare_dependencies(runner, dependencies)
     entry = get_store_entry(runner, store, generator_inputs, GenerateSettings(
-        rom, dependencies, args.distro, args.generation_timeout, args.jobs), regenerate=args.regenerate)
+        rom, dependencies, args.distro, args.generation_timeout), regenerate=args.regenerate)
     print("Generated code: " + str(entry.path), flush=True)
 
     entry_key = entry.path.name
