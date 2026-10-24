@@ -3,23 +3,23 @@
 
 Fork-only. Unlike build_from_rom.py, every run reuses one workspace,
 %LOCALAPPDATA%\\JFG\\b\\<checkout-hash>\\dev, and runs only the steps that are
-out of date: generate when the generated code no longer matches the ROM or the
-generator inputs, configure when the configure arguments changed, and always
-cmake --build. All generated files stay local.
+out of date: generate when the generated-code store (%LOCALAPPDATA%\\JFG\\g) has
+no valid entry for the ROM and generator inputs, configure when the configure
+arguments changed, and always cmake --build. All generated files stay local.
 """
 from __future__ import annotations
 
 import argparse
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import re
 import shutil
-import stat
 import subprocess
 import sys
 import time
@@ -28,9 +28,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from build_paths import check_binary_path, windows_cache  # noqa: E402
 from build_from_rom import NAMES, ROM_SHA1, find_cmake, validate_rom, wsl_path  # noqa: E402
 from runtime_identity import write_identity  # noqa: E402
+from generated_code_store import (  # noqa: E402
+    KEY_LENGTH, StoreResult, ensure_store_entry, entry_problem, finish_staged_entry, read_json,
+    remove_stale_leftovers, remove_tree, store_entry_path, store_key,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 DEV_WORKSPACE_NAME = "dev"
+GENERATED_CODE_STORE_NAME = "g"
 NATIVE_BUILD_NAME = "n"
 LOG_FOLDER_NAME = "logs"
 STATE_FILE_NAME = "dev-build.json"
@@ -43,6 +48,19 @@ def dev_workspace(checkout: Path, cache_base: Path | None = None) -> Path:
     workspace = windows_cache(checkout, cache_base) / DEV_WORKSPACE_NAME
     check_binary_path(native_build_tree(workspace))
     return workspace
+
+
+def generated_code_store_root(jfg_base: Path | None = None) -> Path:
+    """Return the generated-code store shared by every checkout: %LOCALAPPDATA%\\JFG\\g."""
+    if jfg_base is None:
+        local = os.environ.get("LOCALAPPDATA")
+        if not local:
+            raise ValueError("LOCALAPPDATA is unavailable, so the generated-code store can't be found.")
+        jfg_base = Path(local) / "JFG"
+    store = jfg_base.resolve() / GENERATED_CODE_STORE_NAME
+    # Generated sources compile straight from the entry, so its path counts toward MSBuild's limit.
+    check_binary_path(store_entry_path(store, "0" * KEY_LENGTH) / "normalized")
+    return store
 
 
 def native_build_tree(workspace: Path) -> Path:
@@ -104,32 +122,12 @@ def generator_input_fingerprint(root: Path, relative_paths: Iterable[str]) -> di
     return fingerprint
 
 
-def changed_generator_inputs(recorded: dict[str, str], current: dict[str, str]) -> list[str]:
-    """Return the sorted paths whose digest differs, including added and removed inputs."""
-    names = set(recorded) | set(current)
-    return sorted(name for name in names if recorded.get(name) != current.get(name))
-
-
-# The files generate_from_rom.py lists in generation.json; the same set that
-# build_from_rom.py --resume-native requires.
-GENERATED_FILES = frozenset({
-    "normalized/sources.json", "libultra.json", "audio/production-audio-adapter.cpp",
-    "audio/brokered-rsp.hpp", "audio/brokered-jfg-audio-probe.cpp", "audio/jfg-audio-probe.cpp",
-    "normalized/jfg_original_timing.h", "normalized/original-timing.json",
-    "normalized/jfg_original_timing_fast.h", "normalized/funcs.h",
-})
-
-
 @dataclass(frozen=True)
 class WorkspaceState:
     """What a development workspace holds before a run; the empty default is a new workspace."""
 
-    # Contents of generation.json, or None when it is missing or unreadable.
-    generation: Mapping[str, object] | None = None
-    # SHA-256 of each file generation.json lists, as found on disk (None: missing).
-    generated_file_digests: Mapping[str, str | None] = field(default_factory=dict)
-    # Generator-input fingerprint recorded when the generated code was made.
-    generator_inputs: Mapping[str, str] | None = None
+    # Key of the store entry the build tree was last configured against.
+    store_key: str | None = None
     configure_arguments: list[str] | None = None
     configure_succeeded: bool = False
     has_cmake_cache: bool = False
@@ -137,41 +135,11 @@ class WorkspaceState:
 
 @dataclass(frozen=True)
 class BuildPlan:
-    """The steps a run performs, and why it generates or configures."""
+    """Whether a run configures before it builds, and why."""
 
-    generate: bool
     configure: bool
     reasons: tuple[str, ...]
     build: bool = True
-
-
-def generation_problem(state: WorkspaceState) -> str | None:
-    """Return why the generated code can't be used, with the checks of --resume-native."""
-    generation = state.generation
-    if generation is None:
-        return "no generation.json"
-    if generation.get("complete") is not True:
-        return "generation.json is incomplete"
-    if generation.get("rom_sha1") != ROM_SHA1:
-        return "generated from another ROM"
-    recorded_files = generation.get("files")
-    if not isinstance(recorded_files, dict) or set(recorded_files) != GENERATED_FILES:
-        return "generation.json lists unexpected files"
-    changed = sorted(name for name, digest in recorded_files.items()
-                     if state.generated_file_digests.get(name) != digest)
-    if changed:
-        return "generated files missing or changed: " + ", ".join(changed)
-    return None
-
-
-def generator_inputs_problem(state: WorkspaceState, generator_inputs: Mapping[str, str]) -> str | None:
-    """Return why the generator inputs no longer match the generated code."""
-    if state.generator_inputs is None:
-        return "no generator-input fingerprint recorded"
-    changed = changed_generator_inputs(dict(state.generator_inputs), dict(generator_inputs))
-    if changed:
-        return "generator inputs changed: " + ", ".join(Path(name).name for name in changed)
-    return None
 
 
 def configure_problem(state: WorkspaceState, configure_arguments: list[str]) -> str | None:
@@ -185,19 +153,23 @@ def configure_problem(state: WorkspaceState, configure_arguments: list[str]) -> 
     return None
 
 
-def plan_build(state: WorkspaceState, generator_inputs: Mapping[str, str], configure_arguments: list[str],
-               *, reconfigure: bool = False, clean: bool = False) -> BuildPlan:
-    """Decide whether a run generates and configures before it builds."""
+def plan_build(state: WorkspaceState, entry_key: str, configure_arguments: list[str], *,
+               reconfigure: bool = False, clean: bool = False, regenerated: bool = False) -> BuildPlan:
+    """Decide whether a run configures before it builds."""
     if clean:
-        return BuildPlan(generate=True, configure=True, reasons=("--clean given",))
-    generate_reason = generation_problem(state) or generator_inputs_problem(state, generator_inputs)
-    if generate_reason:
-        return BuildPlan(generate=True, configure=True,
-                         reasons=(generate_reason, "configure follows a regeneration"))
-    configure_reason = "--reconfigure given" if reconfigure else configure_problem(state, configure_arguments)
-    if configure_reason:
-        return BuildPlan(generate=False, configure=True, reasons=(configure_reason,))
-    return BuildPlan(generate=False, configure=False, reasons=())
+        return BuildPlan(configure=True, reasons=("--clean given",))
+    if regenerated:
+        configure_reason = "configure follows a regeneration"
+    elif reconfigure:
+        configure_reason = "--reconfigure given"
+    else:
+        configure_reason = configure_problem(state, configure_arguments)
+    if not configure_reason:
+        return BuildPlan(configure=False, reasons=())
+    reasons = [configure_reason]
+    if state.store_key and state.store_key != entry_key:
+        reasons.append(f"generated-code store key changed: {state.store_key} -> {entry_key}")
+    return BuildPlan(configure=True, reasons=tuple(reasons))
 
 
 @dataclass(frozen=True)
@@ -209,10 +181,9 @@ class GeneratedCode:
     audio: Path
 
 
-def generated_code_location(workspace: Path) -> GeneratedCode:
-    """Return the generated code of a workspace, in generate_from_rom.py's layout."""
-    return GeneratedCode(normalized=workspace / "normalized", libultra=workspace / "libultra.json",
-                         audio=workspace / "audio")
+def generated_code_location(entry: Path) -> GeneratedCode:
+    """Return the generated code of a store entry, in generate_from_rom.py's layout."""
+    return GeneratedCode(normalized=entry / "normalized", libultra=entry / "libultra.json", audio=entry / "audio")
 
 
 def generated_code_configure_arguments(generated: GeneratedCode) -> list[str]:
@@ -243,38 +214,12 @@ def runtime_executable(build: Path) -> Path:
     return build / "Release" / (BUILD_TARGET + ".exe")
 
 
-def file_sha256(path: Path) -> str | None:
-    """Return the SHA-256 of a file, or None when it is missing."""
-    if not path.is_file():
-        return None
-    with path.open("rb") as stream:
-        return hashlib.file_digest(stream, "sha256").hexdigest()
-
-
-def read_json(path: Path) -> dict | None:
-    """Return a JSON object from a file, or None when it is missing or unreadable."""
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    return value if isinstance(value, dict) else None
-
-
 def read_workspace_state(workspace: Path) -> WorkspaceState:
-    """Read what the workspace holds: generation.json, the generated files, dev state and CMake cache."""
-    generation = read_json(workspace / "generation.json")
-    recorded_files = generation.get("files") if generation else None
-    digests = {}
-    if isinstance(recorded_files, dict):
-        # Hash only the known names, so generation.json can't point outside the workspace.
-        for name in GENERATED_FILES & set(recorded_files):
-            digests[name] = file_sha256(workspace / name)
+    """Read what the workspace holds: dev state and CMake cache."""
     dev_state = read_json(workspace / STATE_FILE_NAME) or {}
     configure = dev_state.get("configure") or {}
     return WorkspaceState(
-        generation=generation,
-        generated_file_digests=digests,
-        generator_inputs=dev_state.get("generator_inputs"),
+        store_key=dev_state.get("store_key"),
         configure_arguments=configure.get("arguments"),
         configure_succeeded=configure.get("succeeded") is True,
         has_cmake_cache=(native_build_tree(workspace) / "CMakeCache.txt").is_file(),
@@ -284,9 +229,9 @@ def read_workspace_state(workspace: Path) -> WorkspaceState:
 class DevState:
     """The fork-owned state file of a development workspace (dev-build.json).
 
-    It records the generator-input fingerprint of the generated code, the last
+    It records the store key the build tree was configured against, the last
     configure arguments and whether that configure succeeded, and the step
-    timings of the last run. generation.json stays upstream's generator's.
+    timings of the last run.
     """
 
     def __init__(self, workspace: Path) -> None:
@@ -298,44 +243,12 @@ class DevState:
         self.path.write_text(json.dumps(self.data, indent=2) + "\n", encoding="utf-8")
 
 
-def remove_tree(path: Path) -> None:
-    """Delete a folder, including read-only files."""
-    def make_writable_and_retry(function, failed_path, _error) -> None:
-        os.chmod(failed_path, stat.S_IWRITE)
-        function(failed_path)
-    if not path.is_dir():
-        return
-    # onerror is deprecated from Python 3.12 on; onexc replaces it.
-    if sys.version_info >= (3, 12):
-        shutil.rmtree(path, onexc=make_writable_and_retry)
-    else:
-        shutil.rmtree(path, onerror=make_writable_and_retry)
-
-
 def remove_dev_workspace(workspace: Path, cache: Path) -> None:
     """Delete the development workspace, after checking it is this checkout's."""
     workspace = workspace.resolve()
     if workspace.parent != cache.resolve() or workspace.name != DEV_WORKSPACE_NAME:
         raise ValueError(f"Refusing to delete {workspace}: not this checkout's development workspace.")
     remove_tree(workspace)
-
-
-def remove_generated_outputs(workspace: Path) -> None:
-    """Delete generation.json and everything generation wrote; keep the build tree, logs and state.
-
-    generate_from_rom.py refuses to write into some existing folders
-    (context, helper-*), and without generation.json an interrupted
-    generation is seen as incomplete on the next run.
-    """
-    kept = {NATIVE_BUILD_NAME, LOG_FOLDER_NAME, STATE_FILE_NAME}
-    (workspace / "generation.json").unlink(missing_ok=True)
-    for item in workspace.iterdir():
-        if item.name in kept:
-            continue
-        if item.is_dir() and not item.is_symlink():
-            remove_tree(item)
-        else:
-            item.unlink()
 
 
 COMPILER_ERROR = re.compile(r"\b(?:error|fatal error) (?:C[0-9]{4}|LNK[0-9]{4}|MSB[0-9]{4})\b", re.I)
@@ -413,15 +326,37 @@ class GenerateSettings:
     jobs: int
 
 
-def generate(runner: StepRunner, workspace: Path, settings: GenerateSettings) -> GeneratedCode:
-    """Generate the code from the ROM into the workspace with the command build_from_rom.py uses."""
-    remove_generated_outputs(workspace)
+def run_generator(runner: StepRunner, workspace: Path, settings: GenerateSettings) -> None:
+    """Generate the code from the ROM into an empty folder with the command build_from_rom.py uses."""
     runner.run("generate", ["wsl", "-d", settings.distro, "--exec", "timeout", "--kill-after=3s",
                str(settings.timeout_seconds) + "s", "python3",
                wsl_path(ROOT / "scripts/generate_from_rom.py"), "--rom", wsl_path(settings.rom),
                "--workspace", wsl_path(workspace), "--dependency-root", wsl_path(settings.dependencies),
                "--jobs", str(settings.jobs)])
-    return generated_code_location(workspace)
+
+
+STORE_OUTCOME_MESSAGES = {
+    "reused": "generate: skipped (reused store entry {key})",
+    "lost-race": "generate: store entry {key} was published by another run meanwhile; using it",
+    "generated": "generate: published store entry {key}",
+    "replaced": "generate: replaced store entry {key} ({reason})",
+}
+
+
+def get_store_entry(runner: StepRunner, store: Path, generator_inputs: dict[str, str],
+                    settings: GenerateSettings, *, regenerate: bool) -> StoreResult:
+    """Find the store entry for the ROM and generator inputs, generating it when it is missing or unusable."""
+    key = store_key(ROM_SHA1, generator_inputs)
+
+    def generate_entry(staging: Path) -> None:
+        with runner.step("generate"):
+            run_generator(runner, staging, settings)
+            finish_staged_entry(staging, key, ROM_SHA1, generator_inputs)
+
+    result = ensure_store_entry(store, key, generate_entry, lambda entry: entry_problem(entry, key, ROM_SHA1),
+                                regenerate=regenerate)
+    print(STORE_OUTCOME_MESSAGES[result.outcome].format(key=key, reason=result.reason), flush=True)
+    return result
 
 
 def play(executable: Path, rom: Path) -> int:
@@ -445,7 +380,10 @@ def parse_arguments() -> argparse.Namespace:
                         help="Hard limit for the Linux subprocess group, in seconds")
     parser.add_argument("--play", action="store_true", help="Start the runtime after a successful build")
     parser.add_argument("--reconfigure", action="store_true", help="Configure even when nothing requires it")
-    parser.add_argument("--clean", action="store_true", help="Delete the development workspace and start over")
+    parser.add_argument("--clean", action="store_true",
+                        help="Delete the development workspace and start over (keeps the generated-code store)")
+    parser.add_argument("--regenerate", action="store_true",
+                        help="Move the generated-code store entry aside and generate it again")
     args = parser.parse_args()
     if os.name != "nt" or sys.version_info < (3, 11):
         parser.error("This build requires Windows x64 and Python 3.11 or newer.")
@@ -458,6 +396,7 @@ def parse_arguments() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_arguments()
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     started = time.monotonic()
     rom = args.rom.resolve()
     validate_rom(rom)  # Reject before downloads or build output.
@@ -474,33 +413,29 @@ def main() -> int:
         print("--clean given: deleting the development workspace", flush=True)
         remove_dev_workspace(workspace, cache)
     workspace.mkdir(parents=True, exist_ok=True)
+    store = generated_code_store_root()
+    remove_stale_leftovers(store)
 
     generator_inputs = generator_input_fingerprint(ROOT, generator_input_paths(ROOT))
-    generated = generated_code_location(workspace)
-    arguments = configure_arguments(build, generated, dependencies, args.jobs)
-    plan = plan_build(read_workspace_state(workspace), generator_inputs, arguments,
-                      reconfigure=args.reconfigure, clean=args.clean)
-    for reason in plan.reasons:
-        print("Reason: " + reason, flush=True)
-
     runner = StepRunner(workspace)
     state = DevState(workspace)
     with runner.step("dependencies"):
         prepare_dependencies(runner, dependencies)
-    if plan.generate:
-        # Forget the old fingerprint first, so an interrupted generation never looks current.
-        state.update(generator_inputs=None, configure={"arguments": arguments, "succeeded": False})
-        with runner.step("generate"):
-            generated = generate(runner, workspace, GenerateSettings(
-                rom, dependencies, args.distro, args.generation_timeout, args.jobs))
-        state.update(generator_inputs=generator_inputs)
-    else:
-        print("generate: skipped (generated code matches the ROM and generator inputs)", flush=True)
+    entry = get_store_entry(runner, store, generator_inputs, GenerateSettings(
+        rom, dependencies, args.distro, args.generation_timeout, args.jobs), regenerate=args.regenerate)
+    print("Generated code: " + str(entry.path), flush=True)
+
+    entry_key = entry.path.name
+    arguments = configure_arguments(build, generated_code_location(entry.path), dependencies, args.jobs)
+    plan = plan_build(read_workspace_state(workspace), entry_key, arguments, reconfigure=args.reconfigure,
+                      clean=args.clean, regenerated=entry.outcome in ("generated", "replaced"))
+    for reason in plan.reasons:
+        print("Reason: " + reason, flush=True)
     if plan.configure:
         state.update(configure={"arguments": arguments, "succeeded": False})
         with runner.step("configure"):
             runner.run("configure", [cmake, *arguments])
-        state.update(configure={"arguments": arguments, "succeeded": True})
+        state.update(store_key=entry_key, configure={"arguments": arguments, "succeeded": True})
     else:
         print("configure: skipped (configure arguments unchanged)", flush=True)
     with runner.step("build"):

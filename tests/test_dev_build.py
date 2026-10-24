@@ -8,8 +8,8 @@ from scripts.build_paths import MAX_BINARY_ROOT
 from scripts.dev_build import (
     ROOT,
     WorkspaceState,
-    changed_generator_inputs,
     dev_workspace,
+    generated_code_store_root,
     generator_input_fingerprint,
     generator_input_paths,
     native_build_tree,
@@ -44,6 +44,16 @@ class DevWorkspaceTests(unittest.TestCase):
         self.assertLessEqual(len(str(build)), MAX_BINARY_ROOT)
 
 
+class GeneratedCodeStoreRootTests(unittest.TestCase):
+    def test_store_is_g_next_to_the_checkout_caches(self) -> None:
+        base = Path("/" + "x" * 32 + "/JFG")
+        self.assertEqual(generated_code_store_root(base), base.resolve() / "g")
+
+    def test_too_long_store_path_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            generated_code_store_root(Path("/" + "x" * 80 + "/JFG"))
+
+
 class GeneratorInputFingerprintTests(unittest.TestCase):
     def test_names_files_by_repo_relative_posix_path_and_hashes_their_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -71,28 +81,15 @@ class GeneratorInputFingerprintTests(unittest.TestCase):
         self.assertEqual(paths, sorted(set(paths)))
         self.assertTrue(all((ROOT / path).is_file() for path in paths))
 
-    def test_changed_inputs_name_edited_added_and_removed_files(self) -> None:
-        recorded = {"a.py": "1", "b.py": "2", "gone.py": "3"}
-        current = {"a.py": "1", "b.py": "changed", "new.py": "4"}
-        self.assertEqual(changed_generator_inputs(recorded, current), ["b.py", "gone.py", "new.py"])
 
-
-ROM_SHA1 = "493ced9008dbe932d6e91179b68e8630cf23a023"
-GENERATED_FILES = ("normalized/sources.json", "libultra.json", "audio/production-audio-adapter.cpp",
-                   "audio/brokered-rsp.hpp", "audio/brokered-jfg-audio-probe.cpp", "audio/jfg-audio-probe.cpp",
-                   "normalized/jfg_original_timing.h", "normalized/original-timing.json",
-                   "normalized/jfg_original_timing_fast.h", "normalized/funcs.h")
-INPUTS = {"scripts/build_private_generated_root.py": "aa", "scripts/generate_from_rom.py": "bb"}
-CONFIGURE = ["-S", "repo", "-B", "dev/n", "-DJFG_MSVC_GENERATED_COMPILE_JOBS=8"]
+KEY = "0123456789abcdef"
+CONFIGURE = ["-S", "repo", "-B", "dev/n", "-DJFG_GENERATED_ROOT=g/0123456789abcdef/normalized"]
 
 
 def built_workspace(**changes: object) -> WorkspaceState:
-    """State of a workspace whose last run generated, configured and built successfully."""
-    digests = {name: "digest-" + str(index) for index, name in enumerate(GENERATED_FILES)}
+    """State of a workspace whose last run configured and built successfully."""
     fields: dict[str, object] = {
-        "generation": {"complete": True, "rom_sha1": ROM_SHA1, "files": dict(digests)},
-        "generated_file_digests": dict(digests),
-        "generator_inputs": dict(INPUTS),
+        "store_key": KEY,
         "configure_arguments": list(CONFIGURE),
         "configure_succeeded": True,
         "has_cmake_cache": True,
@@ -102,67 +99,54 @@ def built_workspace(**changes: object) -> WorkspaceState:
 
 
 class PlanBuildTests(unittest.TestCase):
-    def plan(self, state: WorkspaceState, **options: bool):
-        return plan_build(state, dict(INPUTS), list(CONFIGURE), **options)
+    def plan(self, state: WorkspaceState, key: str = KEY, configure: list[str] = CONFIGURE, **options: bool):
+        return plan_build(state, key, list(configure), **options)
 
-    def test_first_run_generates_configures_and_builds(self) -> None:
+    def test_first_run_configures_and_builds(self) -> None:
         plan = self.plan(WorkspaceState())
-        self.assertTrue(plan.generate)
         self.assertTrue(plan.configure)
         self.assertTrue(plan.build)
 
     def test_no_change_only_builds(self) -> None:
         plan = self.plan(built_workspace())
-        self.assertFalse(plan.generate)
         self.assertFalse(plan.configure)
         self.assertTrue(plan.build)
+        self.assertEqual(plan.reasons, ())
 
-    def test_invalid_generation_regenerates_and_configures(self) -> None:
-        good = built_workspace()
-        tampered = dict(good.generated_file_digests, **{"normalized/funcs.h": "other"})
-        missing = dict(good.generated_file_digests, **{"libultra.json": None})
-        cases = {
-            "incomplete": built_workspace(generation=dict(good.generation, complete=False)),
-            "other ROM": built_workspace(generation=dict(good.generation, rom_sha1="0" * 40)),
-            "file list": built_workspace(generation=dict(good.generation, files={"libultra.json": "x"})),
-            "changed output": built_workspace(generated_file_digests=tampered),
-            "missing output": built_workspace(generated_file_digests=missing),
-        }
-        for name, state in cases.items():
-            with self.subTest(name):
-                plan = self.plan(state)
-                self.assertTrue(plan.generate)
-                self.assertTrue(plan.configure)
-
-    def test_changed_generator_input_regenerates_and_names_the_file(self) -> None:
-        recorded = dict(INPUTS, **{"scripts/build_private_generated_root.py": "old"})
-        plan = self.plan(built_workspace(generator_inputs=recorded))
-        self.assertTrue(plan.generate)
+    def test_changed_store_key_reconfigures_and_names_both_keys(self) -> None:
+        new_key = "fedcba9876543210"
+        configure = ["-S", "repo", "-B", "dev/n", "-DJFG_GENERATED_ROOT=g/fedcba9876543210/normalized"]
+        plan = self.plan(built_workspace(), key=new_key, configure=configure)
         self.assertTrue(plan.configure)
-        self.assertIn("generator inputs changed: build_private_generated_root.py", plan.reasons)
+        self.assertIn("generated-code store key changed: 0123456789abcdef -> fedcba9876543210", plan.reasons)
 
-    def test_changed_configure_arguments_reconfigure_without_generating(self) -> None:
+    def test_regenerated_entry_reconfigures(self) -> None:
+        plan = self.plan(built_workspace(), regenerated=True)
+        self.assertTrue(plan.configure)
+        self.assertEqual(plan.reasons, ("configure follows a regeneration",))
+
+    def test_entry_generated_for_a_new_key_names_both_keys(self) -> None:
+        plan = self.plan(built_workspace(), key="fedcba9876543210", regenerated=True)
+        self.assertIn("generated-code store key changed: 0123456789abcdef -> fedcba9876543210", plan.reasons)
+
+    def test_changed_configure_arguments_reconfigure(self) -> None:
         recorded = ["-S", "repo", "-B", "dev/n", "-DJFG_MSVC_GENERATED_COMPILE_JOBS=4"]
         plan = self.plan(built_workspace(configure_arguments=recorded))
-        self.assertFalse(plan.generate)
         self.assertTrue(plan.configure)
+        self.assertEqual(plan.reasons, ("configure arguments changed",))
 
     def test_failed_or_missing_configure_reconfigures(self) -> None:
         for state in (built_workspace(configure_succeeded=False), built_workspace(has_cmake_cache=False)):
             with self.subTest(state=state):
-                plan = self.plan(state)
-                self.assertFalse(plan.generate)
-                self.assertTrue(plan.configure)
+                self.assertTrue(self.plan(state).configure)
 
-    def test_reconfigure_option_forces_configure_only(self) -> None:
+    def test_reconfigure_option_forces_configure(self) -> None:
         plan = self.plan(built_workspace(), reconfigure=True)
-        self.assertFalse(plan.generate)
         self.assertTrue(plan.configure)
         self.assertIn("--reconfigure given", plan.reasons)
 
-    def test_clean_option_starts_over_whatever_the_state(self) -> None:
+    def test_clean_option_configures_whatever_the_state(self) -> None:
         plan = self.plan(built_workspace(), clean=True)
-        self.assertTrue(plan.generate)
         self.assertTrue(plan.configure)
         self.assertIn("--clean given", plan.reasons)
 
