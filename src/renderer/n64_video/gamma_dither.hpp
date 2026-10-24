@@ -55,8 +55,8 @@ inline std::string gamma_dither_message(std::uint32_t vi_control) {
 
 // Warns once per run, through log_sink(), when VI_CONTROL asks for gamma
 // dither with gamma; every other setting is shown as asked, so it isn't
-// reported. `setting` is what
-// vi_filtering decided from `vi_control`, which only goes into the message.
+// reported. `setting` is what vi_filtering decided from `vi_control`, which
+// only goes into the message.
 // While no sink is set, a report is dropped without using up the warning.
 inline void report_gamma_dither(GammaDither setting, std::uint32_t vi_control) {
     if (setting != GammaDither::unsupported_with_gamma)

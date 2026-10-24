@@ -99,22 +99,24 @@ int main() {
   // warning stays available for when the sink is set.
   n64_video::log_sink() = nullptr;
   report(0x1301EU);
-  static std::vector<std::string> warnings;
-  static std::vector<n64_video::LogLevel> levels;
+  struct Report {
+    n64_video::LogLevel level;
+    std::string message;
+  };
+  static std::vector<Report> reports;
   n64_video::log_sink() = [](n64_video::LogLevel level, const char *message) {
-    levels.push_back(level);
-    warnings.emplace_back(message);
+    reports.push_back({level, message});
   };
   report(0x13016U);
   report(0x13012U);
-  check(warnings.empty(), "supported gamma-dither settings aren't reported");
+  check(reports.empty(), "supported gamma-dither settings aren't reported");
   report(0x1301EU);
   report(0x1301EU);
   report(0x1311EU);
-  check(warnings.size() == 1, "gamma with gamma dither is reported once per run");
-  check(!warnings.empty() && warnings.front().find("0x1301E") != std::string::npos,
+  check(reports.size() == 1, "gamma with gamma dither is reported once per run");
+  check(!reports.empty() && reports.front().message.find("0x1301E") != std::string::npos,
         "the warning names the VI_CONTROL value");
-  check(levels.size() == 1 && levels.front() == n64_video::LogLevel::warning,
+  check(reports.size() == 1 && reports.front().level == n64_video::LogLevel::warning,
         "gamma with gamma dither is reported as a warning");
   n64_video::log_sink() = nullptr;
 

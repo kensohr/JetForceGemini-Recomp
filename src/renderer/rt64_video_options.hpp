@@ -11,16 +11,16 @@
 
 namespace jfg {
 
-inline LogLevel video_core_log_level(n64_video::LogLevel level) {
+inline jfg::LogLevel video_core_log_level(n64_video::LogLevel level) {
     switch (level) {
-    case n64_video::LogLevel::info:
-        return LogLevel::info;
-    case n64_video::LogLevel::warning:
-        return LogLevel::warning;
     case n64_video::LogLevel::debug:
-        return LogLevel::debug;
+        return jfg::LogLevel::debug;
+    case n64_video::LogLevel::info:
+        return jfg::LogLevel::info;
+    case n64_video::LogLevel::warning:
+        return jfg::LogLevel::warning;
     }
-    return LogLevel::warning;
+    return jfg::LogLevel::warning;
 }
 
 // Applies JFG's video settings to RT64's user configuration. Call it before
@@ -37,7 +37,7 @@ inline void apply_video_options(const Rt64ShellConfiguration& configuration,
         };
     }
     if (n64_video::estimates_coverage(options)) {
-        log_original_video_output(LogLevel::info,
+        log_original_video_output(jfg::LogLevel::info,
             "VI anti-aliasing and divot filter from estimated coverage; "
             "MSAA resolves take RT64's raster path");
     }

@@ -7,9 +7,9 @@
 namespace n64_video {
 
 enum class LogLevel {
+    debug,
     info,
     warning,
-    debug,
 };
 
 using LogSink = void (*)(LogLevel level, const char *message);
