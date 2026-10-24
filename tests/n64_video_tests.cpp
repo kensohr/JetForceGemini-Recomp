@@ -62,6 +62,20 @@ int main() {
   check(original_off.antialiasing == Antialiasing::None,
         "original with anti-aliasing off keeps MSAA off");
   check(enhanced.antialiasing == Antialiasing::None, "enhanced keeps MSAA off");
+  n64_video::VideoOptions original_coverage{true};
+  original_coverage.anti_aliasing = n64_video::AntiAliasing::coverage;
+  Rt64UserConfiguration coverage_configuration;
+  n64_video::apply_to_rt64(original_coverage, coverage_configuration);
+  check(coverage_configuration.antialiasing == Antialiasing::MSAA8X,
+        "original with coverage requests 8x MSAA for its samples");
+  check(n64_video::estimates_coverage(original_coverage),
+        "original with coverage estimates coverage");
+  check(!n64_video::estimates_coverage(n64_video::VideoOptions{true}) &&
+            !n64_video::estimates_coverage(original_without_msaa),
+        "msaa and off don't estimate coverage");
+  n64_video::VideoOptions enhanced_coverage{};
+  enhanced_coverage.anti_aliasing = n64_video::AntiAliasing::coverage;
+  check(!n64_video::estimates_coverage(enhanced_coverage), "enhanced never estimates coverage");
 
   // Supported sample counts as RT64's device reports them: bit value = count.
   constexpr unsigned counts_up_to_8 = 1U | 2U | 4U | 8U;

@@ -20,11 +20,19 @@ enum class Resampling : std::uint32_t {
     replicate = 1,
 };
 
-// What the VI does to a framebuffer on its way to the TV, besides gamma: the
-// dither filter, then horizontal resampling to the scanline.
+// What the VI does to a framebuffer on its way to the TV, besides gamma: VI
+// anti-aliasing of partially covered pixels or the dither filter of fully
+// covered ones, the divot filter, then horizontal resampling to the scanline.
 struct ViFiltering {
+    // Blend each partially covered (edge) pixel with a background the VI
+    // reconstructs from its fully covered neighbours. Off, every pixel counts
+    // as fully covered.
+    bool anti_aliasing = false;
     // Nudge each pixel toward its 3x3 neighbourhood to smooth dither grain.
     bool dither_filter = false;
+    // Median-filter edge pixels with their left and right neighbours to remove
+    // the one-pixel gaps VI anti-aliasing leaves where edges meet.
+    bool divot = false;
     Resampling resampling = Resampling::interpolate;
     // Output samples per scanline (hEnd - hStart); 0 when nothing is shown.
     std::uint32_t active_width = 0;
@@ -40,8 +48,12 @@ inline constexpr std::uint32_t vi_control_type_mask = 0x3U;
 inline constexpr std::uint32_t vi_control_type_16_bit = 0x2U;
 inline constexpr std::uint32_t vi_control_type_32_bit = 0x3U;
 
+inline constexpr std::uint32_t vi_control_divot_bit = 1U << 4;
 inline constexpr std::uint32_t vi_control_aa_mode_shift = 8;
 inline constexpr std::uint32_t vi_control_aa_mode_mask = 0x3U;
+// AA modes 0 and 1 anti-alias with coverage; modes 2 and 3 treat every pixel
+// as fully covered.
+inline constexpr std::uint32_t vi_control_aa_mode_last_with_coverage = 1;
 // AA mode 3: no anti-aliasing and no resampling interpolation.
 inline constexpr std::uint32_t vi_control_aa_mode_replicate = 3;
 inline constexpr std::uint32_t vi_control_dither_filter_bit = 1U << 16;
@@ -69,6 +81,8 @@ inline ViFiltering vi_filtering(const ViRegisters &registers) {
     const std::uint32_t h_end = registers.h_start & vi_h_start_field_mask;
 
     ViFiltering filtering;
+    filtering.anti_aliasing = aa_mode <= vi_control_aa_mode_last_with_coverage;
+    filtering.divot = (registers.control & vi_control_divot_bit) != 0;
     filtering.dither_filter = (registers.control & vi_control_dither_filter_bit) != 0;
     filtering.resampling = (aa_mode == vi_control_aa_mode_replicate)
                                ? Resampling::replicate

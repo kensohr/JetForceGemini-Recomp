@@ -6,6 +6,7 @@
 // and goes away once one approach is chosen.
 //   unset, empty or "msaa": RT64 renders with MSAA (the default)
 //   "off": no anti-aliasing
+//   "coverage": VI anti-aliasing and divot filter from estimated coverage
 #include "jfg/runtime/log.hpp"
 #include "n64_video/video_options.hpp"
 #include <cstdlib>
@@ -25,9 +26,11 @@ inline n64_video::AntiAliasing parse_vi_anti_aliasing_switch(
         return n64_video::AntiAliasing::msaa;
     if (value == "off")
         return n64_video::AntiAliasing::off;
+    if (value == "coverage")
+        return n64_video::AntiAliasing::coverage;
     write_log(log, LogLevel::warning,
         std::string(vi_anti_aliasing_variable) + "='" + std::string(value) +
-            "' is not off or msaa; using msaa");
+            "' is not off, msaa or coverage; using msaa");
     return n64_video::AntiAliasing::msaa;
 }
 

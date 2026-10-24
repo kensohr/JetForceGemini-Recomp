@@ -34,7 +34,8 @@ void apply_to_rt64(const VideoOptions &options, UserConfiguration &configuration
     // and its VI window fit stay: the image fills the window height with
     // sharp pixels, and the aspect ratio still follows the game's VI setup.
     configuration.resolution = UserConfiguration::Resolution::Original;
-    if (options.anti_aliasing == AntiAliasing::msaa) {
+    if ((options.anti_aliasing == AntiAliasing::msaa) ||
+        (options.anti_aliasing == AntiAliasing::coverage)) {
         // The VI anti-aliases with 8 coverage sub-samples, so ask for 8x.
         // limit_msaa_to_device lowers it if the device can't do 8x.
         configuration.antialiasing =

@@ -30,11 +30,14 @@ int main() {
   check(off.anti_aliasing == AntiAliasing::off && off.log.empty(), "off is accepted");
   const auto msaa = parse("msaa");
   check(msaa.anti_aliasing == AntiAliasing::msaa && msaa.log.empty(), "msaa is accepted");
+  const auto coverage = parse("coverage");
+  check(coverage.anti_aliasing == AntiAliasing::coverage && coverage.log.empty(),
+        "coverage is accepted");
   const auto unset = parse("");
   check(unset.anti_aliasing == AntiAliasing::msaa && unset.log.empty(),
         "unset or empty defaults to msaa without a warning");
 
-  for (const char *unknown : {"coverage", "MSAA", "on", " off"}) {
+  for (const char *unknown : {"Coverage", "MSAA", "on", " off"}) {
     const auto parsed = parse(unknown);
     check(parsed.anti_aliasing == AntiAliasing::msaa, "an unknown value defaults to msaa");
     check(parsed.log.find("[warning]") != std::string::npos &&

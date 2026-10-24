@@ -13,6 +13,11 @@ enum class AntiAliasing {
     // edges are softened. An approximation: the VI blends only partially
     // covered pixels with its reconstructed background.
     msaa,
+    // RT64 renders with MSAA at the RDP's sample positions; each pixel's RDP
+    // coverage and front-surface colour are estimated from the samples and
+    // each draw's render mode, and the VI pass runs the VI's own
+    // anti-aliasing and divot filter on them.
+    coverage,
 };
 
 struct VideoOptions {
@@ -30,6 +35,11 @@ struct VideoOptions {
 inline VideoOptions &active_options() {
     static VideoOptions options;
     return options;
+}
+
+// Whether RT64 estimates per-pixel coverage for the VI pass.
+constexpr bool estimates_coverage(const VideoOptions &options) {
+    return options.original_video_output && (options.anti_aliasing == AntiAliasing::coverage);
 }
 
 } // namespace n64_video
