@@ -21,7 +21,7 @@ enum class Resampling : std::uint32_t {
 };
 
 // The VI's gamma-dither noise, from VI_CONTROL bits 2 (gamma dither) and 3
-// (gamma). Numbered as the VI pre-pass shader expects.
+// (gamma). The VI pre-pass shader gets only a 0/1 flag, set for noise.
 enum class GammaDither : std::uint32_t {
     // Bit 2 clear: no noise.
     off = 0,

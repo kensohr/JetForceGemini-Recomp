@@ -27,6 +27,10 @@ inline void apply_video_options(const Rt64ShellConfiguration& configuration,
                 : LogLevel::debug;
             log_original_video_output(log_level, message);
         };
+    }
+    // The VI pre-pass reports gamma dither whenever Original video output's
+    // VI filtering runs, with or without a coverage estimate.
+    if (options.original_video_output) {
         n64_video::gamma_dither_log_sink() = [](const char* message) {
             log_original_video_output(LogLevel::warning, message);
         };
