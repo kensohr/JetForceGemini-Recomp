@@ -56,13 +56,18 @@ all; `main` mirrors the original project's `main`.
 | --- | --- | --- |
 | Camera-relative running | `modern-camera-relative-running` | not offered |
 | Original video output | `original-video-output` | not offered |
+| Optimised from-ROM builds | `release-optimised-rom-build` | not offered |
 
-Planned build-only changes, which change how the game is built, not how it
-plays:
+Build-only changes, which change how the game is built, not how it plays:
+
+- **Optimised from-ROM builds**: add `--release-optimizations` to
+  `scripts/build_from_rom.py` to build the runtime with the release
+  optimisations of the original project's releases, so it plays at their full
+  speed. Off by default. **Status:** done.
+
+Planned build-only changes:
 
 - **Fast development builds**: rebuild in about a minute after a source
   change, instead of regenerating and recompiling everything.
-- **Optimised from-ROM builds**: give builds made from the ROM the full speed
-  of the original project's releases.
 
 **Merged upstream:** none yet.
