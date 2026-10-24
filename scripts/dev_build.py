@@ -33,6 +33,9 @@ from generated_code_store import (  # noqa: E402
     KEY_LENGTH, StoreResult, ensure_store_entry, entry_problem, finish_staged_entry, read_json,
     remove_stale_leftovers, remove_tree, store_entry_path, store_key,
 )
+from sccache_launcher import (  # noqa: E402
+    CompilerCache, choose_launcher, launcher_change, launcher_configure_arguments, sccache_environment,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 DEV_WORKSPACE_NAME = "dev"
@@ -167,7 +170,7 @@ def configure_problem(state: WorkspaceState, configure_arguments: list[str]) -> 
     if not state.configure_succeeded:
         return "the last configure did not succeed"
     if state.configure_arguments != configure_arguments:
-        return "configure arguments changed"
+        return launcher_change(state.configure_arguments, configure_arguments) or "configure arguments changed"
     return None
 
 
@@ -214,14 +217,16 @@ def generated_code_configure_arguments(generated: GeneratedCode) -> list[str]:
             "-DJFG_PHASE8_PRIVATE_AUDIO_ADAPTER_ROOT=" + str(generated.audio)]
 
 
-def configure_arguments(build: Path, generated: GeneratedCode, dependencies: Path, ninja: Path) -> list[str]:
+def configure_arguments(build: Path, generated: GeneratedCode, dependencies: Path, ninja: Path,
+                        launcher: Path | None = None) -> list[str]:
     """Return the cmake configure arguments (without the cmake executable).
 
     The -D definitions must match build_from_rom.py's configure step, so a
     development build compiles the same runtime as a from-ROM build. Two are
     left out: JFG_SUPPORT_SYMBOLS (cmake/dev_build.cmake switches it off for
     /Z7 and links with /DEBUG itself) and JFG_MSVC_GENERATED_COMPILE_JOBS
-    (MSBuild-only; Ninja parallelises across files).
+    (MSBuild-only; Ninja parallelises across files). The compiler launcher
+    (sccache, or None) is development-build only.
     """
     return ["-S", str(ROOT), "-B", str(build), "-C", str(DEV_CACHE_FILE),
             "-G", DEV_GENERATOR, "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_MAKE_PROGRAM=" + str(ninja),
@@ -229,7 +234,8 @@ def configure_arguments(build: Path, generated: GeneratedCode, dependencies: Pat
             "-DJFG_BUILD_PHASE8_LIVE=ON", "-DJFG_ENABLE_RT64=ON",
             *generated_code_configure_arguments(generated),
             "-DJFG_PHASE8_PRIVATE_AUDIO_RUNTIME_INCLUDE=" + str(dependencies / "N64ModernRuntime/librecomp/include"),
-            "-DJFG_RT64_ROOT=" + str(dependencies / "rt64")]
+            "-DJFG_RT64_ROOT=" + str(dependencies / "rt64"),
+            *launcher_configure_arguments(launcher)]
 
 
 def runtime_executable(build: Path) -> Path:
@@ -492,6 +498,8 @@ def argument_parser() -> argparse.ArgumentParser:
                         help="Delete the development workspace and start over (keeps the generated-code store)")
     parser.add_argument("--regenerate", action="store_true",
                         help="Move the generated-code store entry aside and generate it again")
+    parser.add_argument("--no-sccache", action="store_true",
+                        help="Compile without sccache even when it is installed (e.g. for baseline timings)")
     dev_bundle.add_bundle_arguments(parser)
     return parser
 
@@ -537,6 +545,10 @@ def main() -> int:
     state = DevState(workspace)
     # Ninja, unlike MSBuild, needs cl and link on PATH; captured once per run.
     msvc = msvc_environment(tools.vcvars)
+    launcher = choose_launcher(no_sccache=args.no_sccache, found=shutil.which("sccache"))
+    logging.log(launcher.level, launcher.message)
+    # Set even without a launcher, so nothing ever fills sccache's default cache folder.
+    msvc.update(sccache_environment(Path(os.environ["LOCALAPPDATA"])))
     with runner.step("dependencies"):
         prepare_dependencies(runner, dependencies)
     entry = get_store_entry(runner, store, generator_inputs, GenerateSettings(
@@ -544,7 +556,8 @@ def main() -> int:
     print("Generated code: " + str(entry.path), flush=True)
 
     entry_key = entry.path.name
-    arguments = configure_arguments(build, generated_code_location(entry.path), dependencies, tools.ninja)
+    arguments = configure_arguments(build, generated_code_location(entry.path), dependencies, tools.ninja,
+                                    launcher.launcher)
     plan = plan_build(read_workspace_state(workspace), entry_key, arguments, reconfigure=args.reconfigure,
                       clean=args.clean, regenerated=entry.outcome in ("generated", "replaced"))
     for reason in plan.reasons:
@@ -559,8 +572,15 @@ def main() -> int:
         state.update(store_key=entry_key, configure={"arguments": arguments, "succeeded": True})
     else:
         print("configure: skipped (configure arguments unchanged)", flush=True)
-    with runner.step("build"):
-        runner.run("build", build_command(cmake, build, args.jobs), env=msvc)
+    compiler_cache = CompilerCache(launcher.launcher, msvc) if launcher.launcher else None
+    if compiler_cache:
+        compiler_cache.start()
+    try:
+        with runner.step("build"):
+            runner.run("build", build_command(cmake, build, args.jobs), env=msvc)
+    finally:
+        if compiler_cache:
+            compiler_cache.report()
     executable = runtime_executable(build)
     if not executable.is_file():
         raise RuntimeError("Build finished without the native executable.")
@@ -574,7 +594,9 @@ def main() -> int:
     ran = [timing["step"] for timing in runner.timings]
     skipped = [name for name in ("generate", "configure") if name not in ran]
     skipped_text = "; skipped " + ", ".join(skipped) if skipped else ""
-    print(f"Development build done in {total_seconds} s: ran {', '.join(ran)}{skipped_text}", flush=True)
+    sccache_text = "; sccache used" if compiler_cache else "; sccache not used"
+    print(f"Development build done in {total_seconds} s: ran {', '.join(ran)}{skipped_text}{sccache_text}",
+          flush=True)
     print("Built: " + str(executable), flush=True)
     print("Keep this build local. It contains code generated from your ROM.", flush=True)
     if args.play:
