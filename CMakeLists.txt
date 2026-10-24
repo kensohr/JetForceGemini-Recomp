@@ -313,7 +313,6 @@ if(JFG_ENABLE_RT64)
     # presentation and interpolation patches above.
     jfg_n64_video_patch_rt64_target("${jfg_capacity_original_root}"
         "${PROJECT_SOURCE_DIR}/src/renderer")
-    jfg_vi_coverage_patch_rt64_target("${jfg_capacity_original_root}")
 
     # The pinned Plume D3D12 backend assumes every CopyTextureRegion
     # destination is a texture when configuring programmable sample

@@ -5,27 +5,14 @@
 // configures it only through VideoOptions.
 namespace n64_video {
 
-// How Original video output stands in for the VI's edge anti-aliasing.
-enum class AntiAliasing {
-    // Polygon edges stay as RT64 draws them: hard and stair-stepped.
-    off,
-    // RT64 renders with MSAA and the VI pass reads the averaged colour, so
-    // edges are softened. An approximation: the VI blends only partially
-    // covered pixels with its reconstructed background.
-    msaa,
-    // RT64 renders with MSAA at the RDP's sample positions; each pixel's RDP
-    // coverage and front-surface colour are estimated from the samples and
-    // each draw's render mode, and the VI pass runs the VI's own
-    // anti-aliasing and divot filter on them.
-    coverage,
-};
-
 struct VideoOptions {
     // Show the game as the console sent it to the TV: native resolution
     // (320x240) and the VI's 16-bit colour, instead of a window-scaled image.
+    // Under it, RT64 renders with MSAA at the RDP's sample positions; each
+    // pixel's RDP coverage and front-surface colour are estimated from the
+    // samples and each draw's render mode, and the VI pass runs the VI's own
+    // anti-aliasing and divot filter on them.
     bool original_video_output = false;
-    // Applies only under original_video_output.
-    AntiAliasing anti_aliasing = AntiAliasing::msaa;
 };
 
 // The options in effect for the running renderer. apply_to_rt64 sets them;
@@ -37,9 +24,11 @@ inline VideoOptions &active_options() {
     return options;
 }
 
-// Whether RT64 estimates per-pixel coverage for the VI pass.
+// Whether RT64 estimates per-pixel coverage for the VI pass: always under
+// Original video output, which needs it for VI anti-aliasing and the divot
+// filter.
 constexpr bool estimates_coverage(const VideoOptions &options) {
-    return options.original_video_output && (options.anti_aliasing == AntiAliasing::coverage);
+    return options.original_video_output;
 }
 
 } // namespace n64_video

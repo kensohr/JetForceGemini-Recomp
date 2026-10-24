@@ -1,8 +1,8 @@
 //
 // Video core coverage estimate: runs CoverageEstimateCS after each
 // framebuffer pair on the workload thread and keeps the result with the
-// colour target. Compiled into RT64 by the coverage patch
-// (cmake/rt64_vi_coverage.cmake). The decisions it applies live in
+// colour target. Compiled into RT64 by the video core's patch
+// (cmake/rt64_n64_video.cmake). The decisions it applies live in
 // n64_video/coverage_estimate.hpp.
 //
 

@@ -59,7 +59,7 @@ namespace RT64 {
     };
 
     // Whether the raster shader marks anti-aliased samples in colour targets
-    // drawn with `multisampling`: under the coverage option, and only with
+    // drawn with `multisampling`: under Original video output, and only with
     // MSAA, because only a resolve takes the mark off before RT64 reads the
     // target.
     bool writesCoverageRecord(const RenderMultisampling &multisampling);

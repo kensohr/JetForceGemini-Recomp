@@ -1,5 +1,5 @@
 // Video core checks for VI anti-aliasing and the divot filter from estimated
-// coverage (option B of Original video output's anti-aliasing).
+// coverage.
 #include "n64_video/coverage_estimate.hpp"
 #include "n64_video/vi_anti_aliasing.hpp"
 #include "n64_video/vi_filtering.hpp"
@@ -166,20 +166,20 @@ int main() {
     DrawCoverageMode mode;
     unsigned output;
   };
-  // Under `msaa` the sample holds RT64's value alone; under `coverage` the
-  // raster shader adds the record. The value RT64 reads back (resolve,
-  // RDRAM, framebuffer textures) must be the same.
-  auto msaa_and_coverage = [&](std::initializer_list<Draw> draws) {
-    unsigned msaa = 0;
-    unsigned coverage = 0;
+  // Without the record a sample holds RT64's value alone; with it the raster
+  // shader adds the record. The value RT64 reads back (resolve, RDRAM,
+  // framebuffer textures) must be the same either way.
+  auto without_and_with_record = [&](std::initializer_list<Draw> draws) {
+    unsigned without_record = 0;
+    unsigned with_record = 0;
     for (const Draw &draw : draws) {
-      msaa = blend(msaa, draw.mode, draw.output);
-      coverage = blend(coverage, draw.mode, n64_video::record_sample_alpha(draw.output, draw.mode));
+      without_record = blend(without_record, draw.mode, draw.output);
+      with_record = blend(with_record, draw.mode, n64_video::record_sample_alpha(draw.output, draw.mode));
     }
-    return std::array<unsigned, 2>{msaa, n64_video::rt64_coverage_value(coverage, alpha_range)};
+    return std::array<unsigned, 2>{without_record, n64_video::rt64_coverage_value(with_record, alpha_range)};
   };
   auto rt64_value_kept = [&](std::initializer_list<Draw> draws) {
-    const auto values = msaa_and_coverage(draws);
+    const auto values = without_and_with_record(draws);
     return values[0] == values[1];
   };
   check(rt64_value_kept({{aa_opaque, 7}}) && rt64_value_kept({{aa_cut_out, 3}}) &&
@@ -187,26 +187,26 @@ int main() {
         "RT64's coverage value reads back unchanged under the record");
   check(rt64_value_kept({{aa_opaque, 7}, {aa_translucent, 8}}) &&
             rt64_value_kept({{aa_opaque, 7}, {aa_translucent_alpha, 4}, {aa_translucent_alpha, 5}}),
-        "CVG_DST_WRAP adds RT64's coverage on top of an anti-aliased sample as under msaa");
+        "CVG_DST_WRAP adds RT64's coverage on top of an anti-aliased sample as without the record");
   check(rt64_value_kept({{opaque, 7}, {aa_translucent_alpha, 3}}) &&
             rt64_value_kept({{aa_translucent, 8}}),
-        "CVG_DST_WRAP over a full or empty sample matches msaa");
+        "CVG_DST_WRAP over a full or empty sample matches RT64 without the record");
   check(rt64_value_kept({{aa_cut_out, 2}, {cloud, 0}}),
-        "CVG_DST_SAVE leaves RT64's value as under msaa");
+        "CVG_DST_SAVE leaves RT64's value as without the record");
   // RT64's resolve averages the samples' values and writes bit 2 of the
   // rounded result back as the 16-bit pixel's coverage bit. An edge pixel
   // half covered by an anti-aliased draw over a full surface: per sample the
   // values read back match, so the averaged bit does too.
   {
-    unsigned msaa_sum = 0;
-    unsigned coverage_sum = 0;
+    unsigned without_record_sum = 0;
+    unsigned with_record_sum = 0;
     for (unsigned s = 0; s < 8; s++) {
       const Draw edge = (s < 4) ? Draw{aa_opaque, 7} : Draw{opaque, 7};
-      const auto values = msaa_and_coverage({{opaque, 7}, edge, {aa_translucent_alpha, s}});
-      msaa_sum += values[0];
-      coverage_sum += values[1];
+      const auto values = without_and_with_record({{opaque, 7}, edge, {aa_translucent_alpha, s}});
+      without_record_sum += values[0];
+      with_record_sum += values[1];
     }
-    check(msaa_sum == coverage_sum, "an averaged edge pixel resolves as under msaa");
+    check(without_record_sum == with_record_sum, "an averaged edge pixel resolves as without the record");
   }
   check(n64_video::rt64_coverage_value(alpha_range, alpha_range) == alpha_range &&
             n64_video::rt64_coverage_value(65535, 65535) == 65535,

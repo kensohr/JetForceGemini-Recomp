@@ -1,6 +1,6 @@
-# Helpers shared by the fork's RT64 patch scripts that patch files site by
-# site (rt64_n64_video.cmake, rt64_vi_coverage.cmake). Each script keeps its
-# own patch sites and pinned hashes; these only do the mechanics.
+# Helpers for the video core's RT64 patch script (rt64_n64_video.cmake),
+# which patches RT64 files site by site. The script keeps the patch sites and
+# pinned hashes; these only do the mechanics.
 
 include_guard(GLOBAL)
 

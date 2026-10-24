@@ -7,9 +7,6 @@
 #include "n64_video/coverage_estimate.hpp"
 #include "n64_video/rt64_configuration.hpp"
 #include "rt64_msaa_support.hpp"
-#include "vi_anti_aliasing_switch.hpp"
-
-#include <iostream>
 
 namespace jfg {
 
@@ -19,15 +16,9 @@ inline void apply_video_options(const Rt64ShellConfiguration& configuration,
                                 RT64::UserConfiguration& user_configuration) {
     n64_video::VideoOptions options;
     options.original_video_output = configuration.video_output == VideoOutput::original;
-    // The switch only affects Original, so Enhanced never reads or warns about it.
-    options.anti_aliasing = options.original_video_output
-        ? read_vi_anti_aliasing_switch(std::cerr)
-        : n64_video::AntiAliasing::off;
-    if (options.original_video_output && options.anti_aliasing == n64_video::AntiAliasing::off)
-        log_original_video_output(LogLevel::info, "MSAA off (JFG_VI_AA=off)");
     if (n64_video::estimates_coverage(options)) {
         log_original_video_output(LogLevel::info,
-            "VI anti-aliasing and divot filter from estimated coverage (JFG_VI_AA=coverage); "
+            "VI anti-aliasing and divot filter from estimated coverage; "
             "MSAA resolves take RT64's raster path");
         n64_video::coverage_log_sink() = [](n64_video::CoverageLogLevel level, const char* message) {
             const LogLevel log_level = level == n64_video::CoverageLogLevel::warning

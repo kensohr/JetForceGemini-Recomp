@@ -34,12 +34,11 @@ rendering settings, a change applies on the next game launch.
   the two neighbouring pixels with the top 5 bits of the fraction, as the VI
   does. In AA mode 3 it repeats the nearest pixel instead.
 - **Gamma**, from `VI_CONTROL`, as RT64 already applied it.
-- **Edges anti-aliased with MSAA, an approximation of VI anti-aliasing.**
-  RT64 renders with 8x MSAA (4x if the device lacks 8x, none if it lacks
-  both or custom sample locations) and the pre-pass reads each pixel's
-  averaged colour, so polygon silhouettes come out softened. The game log
-  names the count in use (`Original video output: MSAA 8x in use`, or a
-  warning on a fallback).
+- **VI anti-aliasing and the divot filter, from estimated coverage.** The
+  console's RDP stores each pixel's coverage (how many of its 8 sub-samples
+  the surface covers) next to its colour, and the VI uses it to soften
+  polygon silhouettes. RT64 doesn't produce coverage, so Original estimates it
+  from RT64's MSAA samples and runs the VI's own filters on it; see below.
 
 Without the dither filter, a 5-bit channel is shown as its 8-bit value with
 the low 3 bits clear, as on the console, so full white is 248 of 255.
@@ -53,67 +52,22 @@ them: `hStart` and `vStart` don't move the image, and there's no overscan
 border or crop.
 
 Interpolated frames are rendered with the same MSAA (RT64 keeps one
-multisampling setup for all render targets) and go through the same VI pass,
-so they get the same treatment.
+multisampling setup for all render targets), copy the coverage estimate of
+the frame they're resolved from, and go through the same VI pass, so they get
+the same treatment.
 
-## Known approximations
+### VI anti-aliasing from estimated coverage
 
-- **Dithering happens once per presented frame.** The console dithers on
-  every RDP blend into the 16-bit framebuffer, with the pattern each draw
-  selects. The pre-pass dithers the finished frame once with one fixed
-  pattern. Opaque surfaces look the same; layered transparent surfaces (fog,
-  explosions, water) carry less accumulated dither noise than on hardware.
-- **MSAA instead of VI anti-aliasing** (`msaa`, the default; `coverage`
-  below emulates it). The console's VI blends only edge pixels (partial
-  coverage) with a background it reconstructs from the neighbouring pixels.
-  RT64 doesn't produce coverage, so MSAA stands in:
-  - MSAA softens every edge, including draws the console keeps sharp: level
-    geometry on levels that don't anti-alias, the HUD and decals.
-  - It blends with the true background instead of the VI's reconstruction,
-    so VI anti-aliasing's own artefacts don't appear.
-  - Cut-out texture edges (foliage) stay sharp; on the console they are
-    anti-aliased through alpha-to-coverage.
-  - The dither filter still runs on edge pixels.
-  - The VI anti-aliasing mode in `VI_CONTROL` is ignored; Jet Force Gemini
-    always runs mode 0.
-- **No divot filter** (`msaa` and `off`). It repairs the one-pixel gaps VI
-  anti-aliasing leaves where edges meet; MSAA leaves none.
-- **The dither filter runs on every pixel** (`msaa` and `off`). The console
-  runs it only on fully covered pixels and anti-aliases edge pixels instead;
-  without coverage every pixel counts as fully covered.
-- **No vertical resampling.** Rows are scaled to the window as RT64 does; the
-  VI's `VI_Y_SCALE` interpolation and interlacing aren't emulated.
-- **No gamma dither.** The VI's random low-bit noise (`VI_CONTROL` gamma
-  dither) isn't added.
-- Pixels outside the framebuffer repeat its edge pixel; the console reads
-  whatever memory lies next to it.
-
-## Temporary developer switch: `JFG_VI_AA`
-
-While two ways of approximating VI anti-aliasing are compared, the
-environment variable `JFG_VI_AA` picks one at game start, under Original
-only. It is developer-only, not a launcher setting, and is removed once one
-approach is chosen.
-
-- unset, empty or `msaa`: MSAA, as above (the default).
-- `off`: no anti-aliasing; edges are hard and stair-stepped.
-- `coverage`: VI anti-aliasing and divot filter from estimated coverage,
-  below.
-- Anything else logs a warning and uses `msaa`.
-
-### `coverage`: VI anti-aliasing from estimated coverage
-
-The console's RDP stores each pixel's coverage (how many of its 8
-sub-samples the surface covers) next to its colour, and the VI uses it. This
-option estimates that coverage from RT64's MSAA samples and runs the VI's own
-filters on it. The game log says `VI anti-aliasing and divot filter from
-estimated coverage (JFG_VI_AA=coverage); MSAA resolves take RT64's raster
-path`, then the MSAA count, and at debug level `coverage estimate running
-(8x MSAA at the RDP's sample positions)` once the first frame is estimated.
+The game log says `VI anti-aliasing and divot filter from estimated coverage;
+MSAA resolves take RT64's raster path`, then the MSAA count in use
+(`Original video output: MSAA 8x in use`, or a warning on a fallback), and at
+debug level `coverage estimate running (8x MSAA at the RDP's sample
+positions)` once the first frame is estimated.
 
 - **Sample positions.** RT64 renders with 8x MSAA at the RDP's 8 sample
   positions (4 sub-scanlines, x 0 and 4/8 on rows 0 and 2, 2/8 and 6/8 on
-  rows 1 and 3). Because RT64 draws the RDP's pixel corner at the rendered
+  rows 1 and 3); 4x if the device lacks 8x, none if it lacks both or custom
+  sample locations. Because RT64 draws the RDP's pixel corner at the rendered
   pixel's centre, half of each RDP pixel's samples land in the rendered
   pixels to its right and below; the estimate gathers them from there.
 - **Render mode per sample.** RT64 already keeps a coverage value per sample
@@ -128,12 +82,12 @@ path`, then the MSAA count, and at debug level `coverage estimate running
   above RT64's own, so it never touches the low 3 bits RT64 writes back to
   RDRAM, and every resolve takes it off each sample before averaging. RDRAM
   writebacks, framebuffers read as textures and colour-to-depth copies then
-  see the same coverage bits as under `msaa`. To take the mark off, resolves
-  always use RT64's raster resolve (its own path when hardware resolve is off,
-  and RT64's default on NVIDIA under D3D12); where `msaa` would use a
-  hardware resolve, the two can round an average differently, as RT64's
-  hardware resolve setting does. The mark is written only with MSAA, the only
-  case with a resolve.
+  see the same coverage bits as RT64 would without the mark. To take the mark
+  off, resolves always use RT64's raster resolve (its own path when hardware
+  resolve is off, and RT64's default on NVIDIA under D3D12); where RT64 would
+  otherwise use a hardware resolve, the two can round an average differently,
+  as RT64's hardware resolve setting does. The mark is written only with
+  MSAA, the only case with a resolve.
 - **Coverage and colour.** After each framebuffer pair, a compute pass finds
   each pixel's front surface: the nearest sample by depth plus every sample
   within 8 times the local depth slope of it, the RDP's own tolerance for
@@ -141,12 +95,10 @@ path`, then the MSAA count, and at debug level `coverage estimate running
   covers; its colour is the average of its samples only, never the
   background, because the VI reconstructs that. Any other front is drawn
   whole by its top-left sample, as the RDP draws a pixel without
-  anti-aliasing. Interpolated frames copy the estimate of the frame they're
-  resolved from.
+  anti-aliasing.
 - **VI pre-pass**, in the VI's order: 16-bit reduction of the front colour;
   per pixel, VI anti-aliasing when it's partially covered, else the dither
-  filter (so the dither filter no longer runs on edge pixels); the divot
-  filter when `VI_CONTROL` bit 4 is set; resampling; gamma.
+  filter; the divot filter when `VI_CONTROL` bit 4 is set; resampling; gamma.
   - VI anti-aliasing: from the 6 neighbours at (-1,-1), (+1,-1), (-2,0),
     (+2,0), (-1,+1), (+1,+1) that are fully covered, per channel the
     penultimate maximum and minimum (the centre counted twice) stand for the
@@ -155,18 +107,26 @@ path`, then the MSAA count, and at debug level `coverage estimate running
   - Divot: where the pixel or its left or right neighbour is partially
     covered, each channel becomes the median of the three.
   - AA modes 2 and 3 treat every pixel as fully covered.
+- **Fallback.** Where the estimate can't run, the pre-pass reads RT64's
+  averaged MSAA colour with every pixel fully covered: silhouettes are
+  softened by the average, and without MSAA they stay hard. See Known
+  approximations.
 
-Known deviations of `coverage`:
+## Known approximations
 
+- **Dithering happens once per presented frame.** The console dithers on
+  every RDP blend into the 16-bit framebuffer, with the pattern each draw
+  selects. The pre-pass dithers the finished frame once with one fixed
+  pattern. Opaque surfaces look the same; layered transparent surfaces (fog,
+  explosions, water) carry less accumulated dither noise than on hardware.
 - **Coverage from depth, not per primitive.** The RDP accumulates coverage
   primitive by primitive, blending surfaces within its depth tolerance; the
   estimate groups the finished samples by depth once, a best effort. The
-  tolerance uses the
-  depth slope of the neighbouring pixels (per axis the smaller difference, so
-  a silhouette on one side doesn't widen it), not each primitive's own. Thin
-  geometry with another surface on both sides (one-pixel railings) gets a
-  wide tolerance and counts as fully covered, softened only by the averaged
-  colour.
+  tolerance uses the depth slope of the neighbouring pixels (per axis the
+  smaller difference, so a silhouette on one side doesn't widen it), not each
+  primitive's own. Thin geometry with another surface on both sides
+  (one-pixel railings) gets a wide tolerance and counts as fully covered,
+  softened only by the averaged colour.
 - **`CVG_DST_SAVE`** keeps the coverage recorded under the draw, which is
   what the RDP stores; the colour the draw blends in still enters the front
   colour.
@@ -188,44 +148,55 @@ Known deviations of `coverage`:
   as front and coverage comes from the draws' render modes only. This is
   logged once as a warning.
 - **Where the estimate can't run** (MSAA unavailable, a resolution or aspect
-  scale other than 1, downsampling), the frame shows the averaged colour at
-  full coverage, as `msaa` does; each cause is logged once as a warning with
-  the sample count, scale or downsample multiplier that caused it.
+  scale other than 1, downsampling), the frame falls back to RT64's averaged
+  colour at full coverage, with hard edges without MSAA; each cause is logged
+  once as a warning with the sample count, scale or downsample multiplier
+  that caused it.
 - **Coverage bits after 16 translucent layers.** A sample takes the mark off
   exactly while RT64's value stays below 128, which it passes only after 16
   full-coverage `CVG_DST_WRAP` draws on the same sample since the last opaque
-  one; from there its read-back coverage bits can differ from `msaa`.
+  one; from there its read-back coverage bits can differ from RT64's without
+  the mark.
+- **No vertical resampling.** Rows are scaled to the window as RT64 does; the
+  VI's `VI_Y_SCALE` interpolation and interlacing aren't emulated.
+- **No gamma dither.** The VI's random low-bit noise (`VI_CONTROL` gamma
+  dither) isn't added.
+- Pixels outside the framebuffer repeat its edge pixel; the console reads
+  whatever memory lies next to it.
 
 ## For other RT64 projects
 
 The emulation lives in the video core, `src/renderer/n64_video/`, which has no
 game-specific code and is configured only through `n64_video::VideoOptions`
-and the VI registers. `cmake/rt64_n64_video.cmake` is its RT64 patch. The core decides what
-the pre-pass does (`colour_reduction.hpp`, `vi_filtering.hpp`); the patch adds
-the pre-pass to `VideoInterfacePS.hlsl`, registers it in RT64's
-`CMakeLists.txt` and `rt64_shader_library.*`, extends `VideoInterfaceCB`, and
-runs it from `VIRenderer::render`. The present queue passes the swap-chain
-framebuffer so the VI pass can rebind it after the pre-pass. Every patched
-input is hash-checked against the pinned RT64.
+and the VI registers. Its decisions and reference arithmetic are in the core
+(`colour_reduction.hpp`, `vi_filtering.hpp`, `coverage_estimate.hpp`,
+`vi_anti_aliasing.hpp`).
 
-For MSAA, `apply_to_rt64` requests 8x when `VideoOptions::anti_aliasing` is
-`msaa`. RT64 only turns an unsupported count off, so a project lowers it with
-`limit_msaa_to_device` (`msaa.hpp` holds the fallback) once the device
-exists: Jet Force Gemini does this from RT64's render init hook, which setup
-calls before its own MSAA check (`src/renderer/rt64_msaa_support.hpp`).
+`cmake/rt64_n64_video.cmake` is its one RT64 patch. Every patched input is
+hash-checked against the pinned RT64, each patch site must exist, and each
+file is written once. It reaches:
 
-The `coverage` option is a second, separate patch,
-`cmake/rt64_vi_coverage.cmake`, applied after the VI-pass patch, so a project
-can take the MSAA option alone. Its decisions and reference arithmetic are in
-the core (`coverage_estimate.hpp`, `vi_anti_aliasing.hpp`, and the AA and
-divot bits in `vi_filtering.hpp`); the files it adds to RT64 (the estimate
-compute shader, the raster shader's mark, the per-target estimate) are in
-`src/renderer/n64_video/rt64_patch/`. The patch extends the raster shader,
-its frame parameters and sample positions, `RenderTarget`, the shader
-library, the workload queue (one estimate per framebuffer pair, copied to
-interpolation targets), the present queue and the VI pre-pass, and makes
-resolves take the mark off (`TextureResolvePS`, `TextureCopyCB`,
-`RenderTarget`). The mark's layout is defined once in
-`n64_video/coverage_layout.h`, which the core includes as C++ and the
-patch's shaders as HLSL. A project reports the estimate's statuses, each
-with a debug or warning level, by setting `n64_video::coverage_log_sink()`.
+- the VI pass: the pre-pass in `VideoInterfacePS.hlsl`, registered in RT64's
+  `CMakeLists.txt` and `rt64_shader_library.*`, with `VideoInterfaceCB`
+  extended and the pre-pass run from `VIRenderer::render`;
+- the present queue, which passes the swap-chain framebuffer so the VI pass
+  can rebind it after the pre-pass, and the frame's coverage estimate;
+- the raster shader and its frame parameters (the per-sample mark) and the
+  MSAA sample positions;
+- resolves, which take the mark off (`TextureResolvePS`, `TextureCopyCB`,
+  `RenderTarget`);
+- `RenderTarget` and the workload queue, which keep one estimate per
+  framebuffer pair and copy it to interpolation targets.
+
+The files it adds to RT64 (the estimate compute shader, the raster shader's
+mark, the per-target estimate) are in `src/renderer/n64_video/rt64_patch/`.
+The mark's layout is defined once in `n64_video/coverage_layout.h`, which the
+core includes as C++ and the patch's shaders as HLSL.
+
+Under Original, `apply_to_rt64` requests 8x MSAA. RT64 only turns an
+unsupported count off, so a project lowers it with `limit_msaa_to_device`
+(`msaa.hpp` holds the fallback) once the device exists: Jet Force Gemini does
+this from RT64's render init hook, which setup calls before its own MSAA
+check (`src/renderer/rt64_msaa_support.hpp`). A project reports the
+estimate's statuses, each with a debug or warning level, by setting
+`n64_video::coverage_log_sink()`.
