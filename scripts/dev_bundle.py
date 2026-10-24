@@ -22,6 +22,7 @@ import sys
 import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from local_app_data import jfg_root  # noqa: E402
 from package_beta import RUNTIME_FILES, digest, runtime_inputs, runtime_manifest  # noqa: E402
 
 LOG = logging.getLogger("dev_bundle")
@@ -134,6 +135,14 @@ class BundleLockedError(RuntimeError):
 Replace = Callable[[Path, Path], None]
 
 
+@dataclass(frozen=True)
+class FileReplacer:
+    """How a staged file is moved over its bundle file: the move itself and the waits while it is locked."""
+
+    replace: Replace = os.replace
+    lock_retry_delays_seconds: Sequence[float] = LOCK_RETRY_DELAYS_SECONDS
+
+
 def read_identity(identity: Path) -> dict[str, str]:
     """Return the key=value lines of a runtime's .support identity."""
     if not identity.is_file():
@@ -143,6 +152,7 @@ def read_identity(identity: Path) -> dict[str, str]:
 
 
 def file_facts(path: Path) -> FileFacts:
+    """Return the size and SHA-256 of a file."""
     return FileFacts(size=path.stat().st_size, sha256=digest(path))
 
 
@@ -212,16 +222,16 @@ def read_bundle_files(bundle: Path) -> dict[str, FileFacts]:
 
 
 def locked_message(bundle: Path, name: str) -> str:
+    """Return the error for a bundle file that stayed locked, telling the user what to close."""
     return (f"{name} in the development bundle is locked: close the launcher and game running from {bundle} "
             "and rerun with --bundle. Until a refresh succeeds, the launcher there may refuse the bundle.")
 
 
-def move_into_place(temporary: Path, destination: Path, replace: Replace,
-                    retry_delays_seconds: Sequence[float]) -> None:
+def move_into_place(temporary: Path, destination: Path, replacer: FileReplacer) -> None:
     """Move a staged file over its bundle file, retrying while the old one is locked."""
-    for attempt, delay in enumerate((*retry_delays_seconds, None), start=1):
+    for attempt, delay in enumerate((*replacer.lock_retry_delays_seconds, None), start=1):
         try:
-            replace(temporary, destination)
+            replacer.replace(temporary, destination)
             return
         except PermissionError as error:
             if delay is None:
@@ -231,19 +241,20 @@ def move_into_place(temporary: Path, destination: Path, replace: Replace,
             time.sleep(delay)
 
 
-def install_file(bundle: Path, name: str, write: Callable[[Path], None], replace: Replace,
-                 retry_delays_seconds: Sequence[float]) -> None:
+def install_file(bundle: Path, name: str, write: Callable[[Path], None], replacer: FileReplacer) -> None:
     """Write a bundle file under a temporary name, then move it over the old one."""
     temporary = bundle / (name + TEMPORARY_SUFFIX)
     write(temporary)
-    move_into_place(temporary, bundle / name, replace, retry_delays_seconds)
+    move_into_place(temporary, bundle / name, replacer)
 
 
 def json_writer(data: dict) -> Callable[[Path], None]:
+    """Return a writer for install_file that writes the data as indented JSON."""
     return lambda path: path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
 
 def copier(source: Path) -> Callable[[Path], None]:
+    """Return a writer for install_file that copies the source file."""
     return lambda path: shutil.copyfile(source, path)
 
 
@@ -254,8 +265,8 @@ def dev_marker(sources: BundleSources, identity: Mapping[str, str], refreshed_at
             "note": "Development bundle: local only, never publish. It contains code compiled from the ROM."}
 
 
-def refresh_dev_bundle(bundle: Path, jfg_root: Path, sources: BundleSources, *, replace: Replace = os.replace,
-                       lock_retry_delays_seconds: Sequence[float] = LOCK_RETRY_DELAYS_SECONDS) -> RefreshResult:
+def refresh_dev_bundle(bundle: Path, jfg_root: Path, sources: BundleSources, *,
+                       replacer: FileReplacer = FileReplacer()) -> RefreshResult:
     """Copy the runtime files and launcher that changed into the development bundle.
 
     The first use (missing or empty folder) copies everything. The dev marker
@@ -275,13 +286,13 @@ def refresh_dev_bundle(bundle: Path, jfg_root: Path, sources: BundleSources, *, 
 
     bundle.mkdir(parents=True, exist_ok=True)
     marker = dev_marker(sources, checked.identity, datetime.now(timezone.utc))
-    install_file(bundle, DEV_MARKER_NAME, json_writer(marker), replace, lock_retry_delays_seconds)
+    install_file(bundle, DEV_MARKER_NAME, json_writer(marker), replacer)
     for copy in plan:
-        install_file(bundle, copy.name, copier(checked.paths[copy.name]), replace, lock_retry_delays_seconds)
+        install_file(bundle, copy.name, copier(checked.paths[copy.name]), replacer)
         LOG.info("  copied %s (%s)", copy.name, copy.reason)
     runtime_copied = any(copy.name in RUNTIME_FILES for copy in plan)
     if runtime_copied:
-        install_file(bundle, MANIFEST_NAME, json_writer(checked.manifest), replace, lock_retry_delays_seconds)
+        install_file(bundle, MANIFEST_NAME, json_writer(checked.manifest), replacer)
     return RefreshResult(bundle, plan, manifest_written=runtime_copied)
 
 
@@ -299,14 +310,6 @@ def add_bundle_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--launcher", type=Path, help=r"Launcher to bundle instead of JFG\l\JFG-Launcher.exe")
     parser.add_argument("--vc-runtime", type=Path,
                         help="x64 Microsoft.VC*.CRT folder instead of the Visual Studio redist one")
-
-
-def jfg_root() -> Path:
-    r"""Return %LOCALAPPDATA%\JFG, the root all local build output lives under."""
-    local = os.environ.get("LOCALAPPDATA")
-    if not local:
-        raise ValueError("LOCALAPPDATA is unavailable, so the development bundle can't be found.")
-    return Path(local) / "JFG"
 
 
 def bundle_location(args: argparse.Namespace, root: Path) -> Path | None:

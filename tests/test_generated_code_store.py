@@ -10,6 +10,7 @@ from pathlib import Path
 
 from scripts.dev_build import generator_input_fingerprint
 from scripts.generated_code_store import (
+    StoreOutcome,
     ensure_store_entry,
     entry_problem,
     finish_staged_entry,
@@ -110,7 +111,7 @@ class StoreEntryLifecycleTests(unittest.TestCase):
     def test_missing_entry_is_generated_in_a_staging_folder_and_published(self) -> None:
         generator = FakeGenerator()
         result = self.ensure(generator)
-        self.assertEqual(result.outcome, "generated")
+        self.assertEqual(result.outcome, StoreOutcome.GENERATED)
         self.assertEqual(result.path, self.store / KEY)
         self.assertEqual((result.path / MARKER).read_text(), "generated")
         [staging] = generator.staging_folders
@@ -123,7 +124,7 @@ class StoreEntryLifecycleTests(unittest.TestCase):
         self.ensure(FakeGenerator())
         generator = FakeGenerator()
         result = self.ensure(generator)
-        self.assertEqual(result.outcome, "reused")
+        self.assertEqual(result.outcome, StoreOutcome.REUSED)
         self.assertEqual(result.path, self.store / KEY)
         self.assertEqual(generator.staging_folders, [])
 
@@ -133,7 +134,7 @@ class StoreEntryLifecycleTests(unittest.TestCase):
         self.assertFalse((self.store / KEY).exists())
         retry = FakeGenerator()
         result = self.ensure(retry)
-        self.assertEqual(result.outcome, "generated")
+        self.assertEqual(result.outcome, StoreOutcome.GENERATED)
         self.assertEqual(len(retry.staging_folders), 1)
         self.assertEqual((result.path / MARKER).read_text(), "generated")
 
@@ -148,7 +149,7 @@ class StoreEntryLifecycleTests(unittest.TestCase):
         generator = FakeGenerator()
         with self.assertLogs("generated_code_store", "WARNING") as logs:
             result = self.ensure(generator)
-        self.assertEqual(result.outcome, "replaced")
+        self.assertEqual(result.outcome, StoreOutcome.REPLACED)
         self.assertEqual(result.reason, "marker changed")
         self.assertEqual(len(generator.staging_folders), 1)
         self.assertEqual((result.path / MARKER).read_text(), "generated")
@@ -160,7 +161,7 @@ class StoreEntryLifecycleTests(unittest.TestCase):
         self.ensure(FakeGenerator())
         generator = FakeGenerator()
         result = self.ensure(generator, regenerate=True)
-        self.assertEqual(result.outcome, "replaced")
+        self.assertEqual(result.outcome, StoreOutcome.REPLACED)
         self.assertEqual(result.reason, "--regenerate given")
         self.assertEqual(len(generator.staging_folders), 1)
         self.assertEqual(len([path for path in self.store.iterdir() if ".bad-" in path.name]), 1)
@@ -175,7 +176,7 @@ class StoreEntryLifecycleTests(unittest.TestCase):
             os.rename(other, self.store / KEY)
 
         result = ensure_store_entry(self.store, KEY, generate_while_another_worktree_publishes, marker_problem)
-        self.assertEqual(result.outcome, "lost-race")
+        self.assertEqual(result.outcome, StoreOutcome.LOST_RACE)
         self.assertEqual(result.path, self.store / KEY)
         self.assertEqual((result.path / "winner.txt").read_text(), "other worktree")
         self.assertEqual(sorted(path.name for path in self.store.iterdir()), [KEY])

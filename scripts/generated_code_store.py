@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from enum import Enum
 import hashlib
 import json
 import logging
@@ -134,13 +135,22 @@ def read_json(path: Path) -> dict | None:
     return value if isinstance(value, dict) else None
 
 
+class StoreOutcome(Enum):
+    """How a run got its store entry."""
+
+    REUSED = "reused"
+    GENERATED = "generated"
+    REPLACED = "replaced"
+    # Another run published the entry while this run was generating it.
+    LOST_RACE = "lost-race"
+
+
 @dataclass(frozen=True)
 class StoreResult:
     """The store entry a build uses, and how this run got it."""
 
     path: Path
-    # One of: reused, generated, replaced, lost-race.
-    outcome: str
+    outcome: StoreOutcome
     # Why an existing entry was replaced; None otherwise.
     reason: str | None = None
 
@@ -171,7 +181,7 @@ def ensure_store_entry(store: Path, key: str, generate: Callable[[Path], None],
     if entry.is_dir():
         replace_reason = "--regenerate given" if regenerate else validate(entry)
         if replace_reason is None:
-            return StoreResult(entry, "reused")
+            return StoreResult(entry, StoreOutcome.REUSED)
         move_aside(entry, replace_reason)
     store.mkdir(parents=True, exist_ok=True)
     staging = staging_folder(store, key)
@@ -186,8 +196,8 @@ def ensure_store_entry(store: Path, key: str, generate: Callable[[Path], None],
         lost_race_problem = validate(entry)
         if lost_race_problem:
             raise RuntimeError(f"Store entry {entry} published by another run is unusable ({lost_race_problem}).")
-        return StoreResult(entry, "lost-race")
-    outcome = "replaced" if replace_reason else "generated"
+        return StoreResult(entry, StoreOutcome.LOST_RACE)
+    outcome = StoreOutcome.REPLACED if replace_reason else StoreOutcome.GENERATED
     return StoreResult(entry, outcome, replace_reason)
 
 
