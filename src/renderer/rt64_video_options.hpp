@@ -5,6 +5,7 @@
 // must not know any one game's types.
 #include "jfg/renderer/rt64_shell.hpp"
 #include "n64_video/coverage_estimate.hpp"
+#include "n64_video/gamma_dither.hpp"
 #include "n64_video/rt64_configuration.hpp"
 #include "rt64_msaa_support.hpp"
 
@@ -25,6 +26,9 @@ inline void apply_video_options(const Rt64ShellConfiguration& configuration,
                 ? LogLevel::warning
                 : LogLevel::debug;
             log_original_video_output(log_level, message);
+        };
+        n64_video::gamma_dither_log_sink() = [](const char* message) {
+            log_original_video_output(LogLevel::warning, message);
         };
     }
     n64_video::apply_to_rt64(options, user_configuration);

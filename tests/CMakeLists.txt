@@ -809,6 +809,12 @@ target_compile_features(jfg_n64_video_coverage_tests PRIVATE cxx_std_20)
 jfg_set_project_warnings(jfg_n64_video_coverage_tests)
 add_test(NAME jfg.n64_video_coverage COMMAND jfg_n64_video_coverage_tests)
 
+add_executable(jfg_n64_video_gamma_dither_tests n64_video_gamma_dither_tests.cpp)
+target_include_directories(jfg_n64_video_gamma_dither_tests PRIVATE "${PROJECT_SOURCE_DIR}/src/renderer")
+target_compile_features(jfg_n64_video_gamma_dither_tests PRIVATE cxx_std_20)
+jfg_set_project_warnings(jfg_n64_video_gamma_dither_tests)
+add_test(NAME jfg.n64_video_gamma_dither COMMAND jfg_n64_video_gamma_dither_tests)
+
 add_executable(jfg_original_video_output_log_tests original_video_output_log_tests.cpp)
 target_include_directories(jfg_original_video_output_log_tests PRIVATE "${PROJECT_SOURCE_DIR}/src/renderer")
 target_link_libraries(jfg_original_video_output_log_tests PRIVATE jfg_runtime)
