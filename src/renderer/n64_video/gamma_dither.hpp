@@ -1,4 +1,5 @@
 #pragma once
+#include "log_sink.hpp"
 #include "vi_filtering.hpp"
 #include <algorithm>
 #include <atomic>
@@ -44,15 +45,6 @@ constexpr std::uint32_t gamma_dither_bits(std::uint32_t x, std::uint32_t y, std:
     return hash & gamma_dither_bits_mask;
 }
 
-// Where the RT64 side reports a gamma-dither setting it can't show, as a
-// warning. A project sets it before RT64 starts rendering; without one, the
-// report is dropped.
-using GammaDitherLogSink = void (*)(const char *message);
-inline GammaDitherLogSink &gamma_dither_log_sink() {
-    static GammaDitherLogSink sink = nullptr;
-    return sink;
-}
-
 inline std::string gamma_dither_message(std::uint32_t vi_control) {
     char value[16];
     std::snprintf(value, sizeof(value), "0x%X", unsigned(vi_control));
@@ -61,20 +53,21 @@ inline std::string gamma_dither_message(std::uint32_t vi_control) {
            "which the VI pass's gamma after the 8-bit pre-pass can't take, so no noise is added";
 }
 
-// Warns once per run when VI_CONTROL asks for gamma dither with gamma; every
-// other setting is shown as asked, so it isn't reported. `setting` is what
-// vi_filtering decided from `vi_control`, which only goes into the message.
+// Warns once per run, through log_sink(), when VI_CONTROL asks for gamma
+// dither with gamma; every other setting is shown as asked, so it isn't
+// reported. `setting` is what vi_filtering decided from `vi_control`, which
+// only goes into the message.
 // While no sink is set, a report is dropped without using up the warning.
 inline void report_gamma_dither(GammaDither setting, std::uint32_t vi_control) {
     if (setting != GammaDither::unsupported_with_gamma)
         return;
-    const GammaDitherLogSink sink = gamma_dither_log_sink();
+    const LogSink sink = log_sink();
     if (sink == nullptr)
         return;
     static std::atomic<bool> reported{false};
     if (reported.exchange(true))
         return;
-    sink(gamma_dither_message(vi_control).c_str());
+    sink(LogLevel::warning, gamma_dither_message(vi_control).c_str());
 }
 
 } // namespace n64_video

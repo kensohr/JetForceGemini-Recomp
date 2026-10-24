@@ -38,7 +38,7 @@ namespace RT64 {
                 return;
             }
 
-            const n64_video::CoverageLogSink sink = n64_video::coverage_log_sink();
+            const n64_video::LogSink sink = n64_video::log_sink();
             if (sink != nullptr) {
                 sink(n64_video::coverage_status_log_level(status), n64_video::coverage_status_message(status, target).c_str());
             }
