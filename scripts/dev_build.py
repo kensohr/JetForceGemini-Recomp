@@ -159,8 +159,11 @@ def plan_build(state: WorkspaceState, entry_key: str, configure_arguments: list[
     if clean:
         return BuildPlan(configure=True, reasons=("--clean given",))
     if regenerated:
-        return BuildPlan(configure=True, reasons=("configure follows a regeneration",))
-    configure_reason = "--reconfigure given" if reconfigure else configure_problem(state, configure_arguments)
+        configure_reason = "configure follows a regeneration"
+    elif reconfigure:
+        configure_reason = "--reconfigure given"
+    else:
+        configure_reason = configure_problem(state, configure_arguments)
     if not configure_reason:
         return BuildPlan(configure=False, reasons=())
     reasons = [configure_reason]

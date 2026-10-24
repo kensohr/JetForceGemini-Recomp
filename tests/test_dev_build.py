@@ -123,7 +123,11 @@ class PlanBuildTests(unittest.TestCase):
     def test_regenerated_entry_reconfigures(self) -> None:
         plan = self.plan(built_workspace(), regenerated=True)
         self.assertTrue(plan.configure)
-        self.assertIn("configure follows a regeneration", plan.reasons)
+        self.assertEqual(plan.reasons, ("configure follows a regeneration",))
+
+    def test_entry_generated_for_a_new_key_names_both_keys(self) -> None:
+        plan = self.plan(built_workspace(), key="fedcba9876543210", regenerated=True)
+        self.assertIn("generated-code store key changed: 0123456789abcdef -> fedcba9876543210", plan.reasons)
 
     def test_changed_configure_arguments_reconfigure(self) -> None:
         recorded = ["-S", "repo", "-B", "dev/n", "-DJFG_MSVC_GENERATED_COMPILE_JOBS=4"]
