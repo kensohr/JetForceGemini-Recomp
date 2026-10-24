@@ -17,24 +17,17 @@
 // hook, Application::end still calls the deinit hook, which drops the pending
 // limit so no pointer to the destroyed configuration outlives it.
 #include "jfg/runtime/log.hpp"
+#include "original_video_output_log.hpp"
 #include "n64_video/rt64_configuration.hpp"
 
 #include "common/rt64_user_configuration.h"
 #include "render/rt64_render_target.h"
 #include "rhi/rt64_render_hooks.h"
 
-#include <iostream>
 #include <string>
 #include <string_view>
 
 namespace jfg {
-
-inline constexpr std::string_view original_video_output_log_prefix =
-    "Original video output: ";
-
-inline void log_original_video_output(LogLevel level, const std::string& message) {
-    write_log(std::cerr, level, std::string(original_video_output_log_prefix) + message);
-}
 
 struct MsaaDeviceLimit {
     RT64::UserConfiguration* configuration = nullptr;
