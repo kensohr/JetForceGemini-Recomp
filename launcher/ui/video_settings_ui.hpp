@@ -27,6 +27,7 @@ struct Ui final : Rml::EventListener {
   static bool sameRender(const jfg::VideoSettings &a,
                          const jfg::VideoSettings &b) {
     return a.mode == b.mode && a.vsync == b.vsync && a.blur == b.blur &&
+           a.output == b.output &&
            (a.mode != jfg::FrameRateMode::custom || a.fps == b.fps);
   }
   bool dirty() const {
@@ -69,6 +70,7 @@ struct Ui final : Rml::EventListener {
       request.vsync = candidate.rendering.vsync;
       request.fog_percent = candidate.rendering.fog_percent;
       request.blur = static_cast<unsigned>(candidate.rendering.blur);
+      request.video_output = static_cast<unsigned>(candidate.rendering.output);
       request.fullscreen = candidate.fullscreen;
       request.window_size = candidate.window_size;
       request.pause_inactive = candidate.pause_inactive;
@@ -97,6 +99,12 @@ struct Ui final : Rml::EventListener {
     selected("video-windowed", !draft.fullscreen);
     selected("video-fullscreen", draft.fullscreen);
     selected("video-pause", draft.pause_inactive);
+    const bool originalOutput = draft.rendering.output == jfg::VideoOutput::original;
+    selected("video-output-enhanced", !originalOutput);
+    selected("video-output-original", originalOutput);
+    text("video-output-hint", originalOutput
+         ? "Shows the game at its native 320 x 240, scaled to fill the window height."
+         : "Renders at a higher resolution that scales with the window.");
     selected("video-vsync", draft.rendering.vsync);
     static_cast<Rml::ElementFormControlInput*>(el("video-fog"))->SetValue(std::to_string(draft.rendering.fog_percent));
     text("video-fog-value",std::to_string(draft.rendering.fog_percent)+"%");
@@ -170,6 +178,7 @@ struct Ui final : Rml::EventListener {
     constexpr Row rows[]={
       {"mode",0,"window mode windowed borderless fullscreen"},
       {"size",0,"window size resolution dimensions 1280 720 1600 900 1920 1080 2560 1440"},
+      {"output",0,"video output enhanced original native resolution 320 240 pixels sharp n64 console"},
       {"pause",0,"pause inactive background focus"},
       {"vsync",1,"vsync v-sync vertical sync display tearing refresh"},
       {"blur",1,"motion blur trails ghosting sickness nausea"},
@@ -195,7 +204,8 @@ struct Ui final : Rml::EventListener {
       el((std::string("video-card-")+row.id).c_str())->SetProperty("display",show?"block":"none");
       if(show){++counts[row.tab];++total;}
     }
-    const bool changed[]={draft.fullscreen!=saved.fullscreen||draft.window_size!=saved.window_size||draft.pause_inactive!=saved.pause_inactive,
+    const bool changed[]={draft.fullscreen!=saved.fullscreen||draft.window_size!=saved.window_size||draft.pause_inactive!=saved.pause_inactive||
+      draft.rendering.output!=saved.rendering.output,
       draft.rendering.vsync!=saved.rendering.vsync||draft.rendering.blur!=saved.rendering.blur,
       draft.rendering.mode!=saved.rendering.mode||fpsText!=std::to_string(saved.rendering.fps),
       draft.rendering.fog_percent!=saved.rendering.fog_percent};
@@ -294,6 +304,10 @@ struct Ui final : Rml::EventListener {
       draft.fullscreen = true;
     else if (id == "video-pause")
       draft.pause_inactive = !draft.pause_inactive;
+    else if (id == "video-output-enhanced")
+      draft.rendering.output = jfg::VideoOutput::enhanced;
+    else if (id == "video-output-original")
+      draft.rendering.output = jfg::VideoOutput::original;
     else if (id == "video-vsync")
       draft.rendering.vsync = !draft.rendering.vsync;
     else if (id == "video-blur-off")

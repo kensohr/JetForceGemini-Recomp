@@ -6172,7 +6172,8 @@ bool initialize_live_renderer(State &state, LiveRt64Window &window) {
        // RT64 already completes its RAM readback before DP completion.
        jfg::Rt64MemoryLayout::host_word_swapped, true, true,
        video_settings->mode == jfg::FrameRateMode::custom ? video_settings->fps : 0U,
-       video_settings->mode == jfg::FrameRateMode::unlimited, video_settings->vsync},
+       video_settings->mode == jfg::FrameRateMode::unlimited, video_settings->vsync,
+       video_settings->output},
       error);
   std::fflush(stdout);
   (void)_dup2(saved_stdout, _fileno(stdout));

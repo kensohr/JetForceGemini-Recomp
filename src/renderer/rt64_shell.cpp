@@ -12,6 +12,7 @@
 #include "rt64_f3ddkr.hpp"
 #include "frame_diagnostics.hpp"
 #include "rt64_cpu_overlay.hpp"
+#include "rt64_video_options.hpp"
 
 #include "hle/rt64_application.h"
 #include "hle/rt64_vi.h"
@@ -974,6 +975,8 @@ std::unique_ptr<Rt64Shell> Rt64Shell::create(
         }
         impl->application->userConfig.developerMode =
             configuration.developer_mode;
+        jfg::apply_video_options(configuration,
+            impl->application->userConfig);
         // JFG draws CPU overlays into the buffer selected by the N64 VI.
         // Skipping to a newer rendered buffer can display it before those edits.
         impl->application->enhancementConfig.presentation.mode =

@@ -9,18 +9,26 @@
 
 namespace jfg {
 enum class FrameRateMode { original, custom, unlimited };
+// Enhanced renders at a window-scaled resolution; Original shows the game at
+// its native resolution (see GLOSSARY "Original video output").
+enum class VideoOutput { enhanced, original };
 struct VideoSettings {
   FrameRateMode mode = FrameRateMode::original;
   unsigned fps = 60;
   bool vsync = true;
   BlurMode blur = BlurMode::reduced;
   unsigned fog_percent = 100;
+  VideoOutput output = VideoOutput::enhanced;
 };
+inline bool valid_video_output(VideoOutput output) {
+  return output == VideoOutput::enhanced || output == VideoOutput::original;
+}
 inline bool valid_video_settings(const VideoSettings &settings) {
   return (settings.mode == FrameRateMode::original ||
           settings.mode == FrameRateMode::custom ||
           settings.mode == FrameRateMode::unlimited) &&
-         settings.fps >= 60 && settings.fps <= 1000 && valid_blur_mode(settings.blur) && settings.fog_percent <= 100;
+         settings.fps >= 60 && settings.fps <= 1000 && valid_blur_mode(settings.blur) && settings.fog_percent <= 100 &&
+         valid_video_output(settings.output);
 }
 inline std::optional<unsigned> parse_video_fps(std::string_view text) {
   if (text.empty())
@@ -93,6 +101,11 @@ parse_video_settings(std::string_view text) {
       unsigned n=0; const auto parsed=std::from_chars(value.data(),value.data()+value.size(),n);
       if(value.empty() || parsed.ec!=std::errc{} || parsed.ptr!=value.data()+value.size() || n>100) return std::nullopt;
       result.fog_percent=n;
+    } else if (key == "video_output") {
+      bit = 64;
+      if (value == "enhanced") result.output = VideoOutput::enhanced;
+      else if (value == "original") result.output = VideoOutput::original;
+      else return std::nullopt;
     } else
       return std::nullopt;
     if (seen & bit)
@@ -100,6 +113,7 @@ parse_video_settings(std::string_view text) {
     seen |= bit;
   }
   // Existing v1 files omit blur and migrate to the owner-selected Reduced default.
+  // Files without video_output keep Enhanced, the output they always had.
   return ((seen & 15U) == 15U) ? std::optional<VideoSettings>(result) : std::nullopt;
 }
 inline std::string serialize_video_settings(const VideoSettings &settings) {
@@ -108,9 +122,11 @@ inline std::string serialize_video_settings(const VideoSettings &settings) {
                                                                  : "original";
   const char *blur = settings.blur == BlurMode::off ? "off" :
                      settings.blur == BlurMode::original ? "original" : "reduced";
+  const char *output = settings.output == VideoOutput::original ? "original" : "enhanced";
   return std::string("version=1\nmode=") + mode +
          "\nfps=" + std::to_string(settings.fps) +
-         "\nvsync=" + (settings.vsync ? "1\n" : "0\n") + "blur=" + blur + "\nfog_percent=" + std::to_string(settings.fog_percent) + "\n";
+         "\nvsync=" + (settings.vsync ? "1\n" : "0\n") + "blur=" + blur + "\nfog_percent=" + std::to_string(settings.fog_percent) +
+         "\nvideo_output=" + output + "\n";
 }
 // Missing configuration uses the original rendering mode. Corrupt or unreadable
 // configuration is reported to the caller rather than silently changing modes.
