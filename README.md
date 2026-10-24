@@ -1,3 +1,9 @@
+> **This is a community fork of
+> [TK22-26/JetForceGemini-Recomp](https://github.com/TK22-26/JetForceGemini-Recomp).**
+> It adds optional features on top of the original; see **[FORK.md](FORK.md)**
+> for what's different. The download links below are the original project's
+> releases and don't include these features.
+
 # Jet Force Gemini Recomp
 
 [![Build status](https://github.com/TK22-26/JetForceGemini-Recomp/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/TK22-26/JetForceGemini-Recomp/actions/workflows/ci.yml)
