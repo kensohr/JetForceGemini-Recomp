@@ -815,6 +815,14 @@ target_compile_features(jfg_n64_video_gamma_dither_tests PRIVATE cxx_std_20)
 jfg_set_project_warnings(jfg_n64_video_gamma_dither_tests)
 add_test(NAME jfg.n64_video_gamma_dither COMMAND jfg_n64_video_gamma_dither_tests)
 
+add_executable(jfg_original_video_output_log_tests original_video_output_log_tests.cpp)
+target_include_directories(jfg_original_video_output_log_tests PRIVATE "${PROJECT_SOURCE_DIR}/src/renderer")
+target_link_libraries(jfg_original_video_output_log_tests PRIVATE jfg_runtime)
+target_compile_features(jfg_original_video_output_log_tests PRIVATE cxx_std_20)
+jfg_set_project_warnings(jfg_original_video_output_log_tests)
+add_test(NAME jfg.original_video_output_log COMMAND jfg_original_video_output_log_tests
+    "${CMAKE_CURRENT_BINARY_DIR}/original-video-output-log-test")
+
 if(WIN32)
     add_executable(jfg_video_dialog_tests video_dialog_tests.cpp ../src/app/video_settings_dialog.cpp ../launcher/native/video_settings.rc)
     target_compile_features(jfg_video_dialog_tests PRIVATE cxx_std_20)
