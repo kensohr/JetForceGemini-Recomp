@@ -34,6 +34,12 @@ rendering settings, a change applies on the next game launch.
   the two neighbouring pixels with the top 5 bits of the fraction, as the VI
   does. In AA mode 3 it repeats the nearest pixel instead.
 - **Gamma**, from `VI_CONTROL`, as RT64 already applied it.
+- **Edges anti-aliased with MSAA, an approximation of VI anti-aliasing.**
+  RT64 renders with 8x MSAA (4x if the device lacks 8x, none if it lacks
+  both or custom sample locations) and the pre-pass reads each pixel's
+  averaged colour, so polygon silhouettes come out softened. The game log
+  names the count in use (`Original video output: MSAA 8x in use`, or a
+  warning on a fallback).
 
 Without the dither filter, a 5-bit channel is shown as its 8-bit value with
 the low 3 bits clear, as on the console, so full white is 248 of 255.
@@ -46,8 +52,9 @@ blends already-filtered samples. Placement and aspect ratio stay as RT64 sets
 them: `hStart` and `vStart` don't move the image, and there's no overscan
 border or crop.
 
-Interpolated frames go through the same VI pass, so they get the same
-treatment.
+Interpolated frames are rendered with the same MSAA (RT64 keeps one
+multisampling setup for all render targets) and go through the same VI pass,
+so they get the same treatment.
 
 ## Known approximations
 
@@ -56,9 +63,20 @@ treatment.
   selects. The pre-pass dithers the finished frame once with one fixed
   pattern. Opaque surfaces look the same; layered transparent surfaces (fog,
   explosions, water) carry less accumulated dither noise than on hardware.
-- **No VI anti-aliasing or divot filter.** Both need each pixel's coverage,
-  which RT64 doesn't produce. Polygon edges therefore look sharper than on
-  the console.
+- **MSAA instead of VI anti-aliasing.** The console's VI blends only edge
+  pixels (partial coverage) with a background it reconstructs from the
+  neighbouring pixels. RT64 doesn't produce coverage, so MSAA stands in:
+  - MSAA softens every edge, including draws the console keeps sharp: level
+    geometry on levels that don't anti-alias, the HUD and decals.
+  - It blends with the true background instead of the VI's reconstruction,
+    so VI anti-aliasing's own artefacts don't appear.
+  - Cut-out texture edges (foliage) stay sharp; on the console they are
+    anti-aliased through alpha-to-coverage.
+  - The dither filter still runs on edge pixels.
+  - The VI anti-aliasing mode in `VI_CONTROL` is ignored; Jet Force Gemini
+    always runs mode 0.
+- **No divot filter.** It repairs the one-pixel gaps VI anti-aliasing leaves
+  where edges meet; MSAA leaves none.
 - **The dither filter runs on every pixel.** The console runs it only on fully
   covered pixels and anti-aliases edge pixels instead; without coverage every
   pixel counts as fully covered.
@@ -68,6 +86,17 @@ treatment.
   dither) isn't added.
 - Pixels outside the framebuffer repeat its edge pixel; the console reads
   whatever memory lies next to it.
+
+## Temporary developer switch: `JFG_VI_AA`
+
+While two ways of approximating VI anti-aliasing are compared, the
+environment variable `JFG_VI_AA` picks one at game start, under Original
+only. It is developer-only, not a launcher setting, and is removed once one
+approach is chosen.
+
+- unset, empty or `msaa`: MSAA, as above (the default).
+- `off`: no anti-aliasing; edges are hard and stair-stepped.
+- Anything else logs a warning and uses `msaa`.
 
 ## For other RT64 projects
 
@@ -80,3 +109,9 @@ the pre-pass to `VideoInterfacePS.hlsl`, registers it in RT64's
 runs it from `VIRenderer::render`. The present queue passes the swap-chain
 framebuffer so the VI pass can rebind it after the pre-pass. Every patched
 input is hash-checked against the pinned RT64.
+
+For MSAA, `apply_to_rt64` requests 8x when `VideoOptions::anti_aliasing` is
+`msaa`. RT64 only turns an unsupported count off, so a project lowers it with
+`limit_msaa_to_device` (`msaa.hpp` holds the fallback) once the device
+exists: Jet Force Gemini does this from RT64's render init hook, which setup
+calls before its own MSAA check (`src/renderer/rt64_msaa_support.hpp`).

@@ -1,5 +1,6 @@
 #include "n64_video/rt64_configuration.hpp"
 #include "n64_video/colour_reduction.hpp"
+#include "n64_video/msaa.hpp"
 #include "n64_video/video_options.hpp"
 #include "n64_video/vi_filtering.hpp"
 #include <cstdint>
@@ -12,11 +13,13 @@ struct Rt64UserConfiguration {
   enum class Resolution { Original, WindowIntegerScale, Manual, OptionCount };
   enum class Filtering { Nearest, Linear, AntiAliasedPixelScaling, OptionCount };
   enum class AspectRatio { Original, Expand, Manual, OptionCount };
+  enum class Antialiasing { None, MSAA2X, MSAA4X, MSAA8X, OptionCount };
   Resolution resolution = Resolution::WindowIntegerScale;
   double resolutionMultiplier = 2.0;
   int downsampleMultiplier = 1;
   Filtering filtering = Filtering::AntiAliasedPixelScaling;
   AspectRatio aspectRatio = AspectRatio::Original;
+  Antialiasing antialiasing = Antialiasing::None;
   bool operator==(const Rt64UserConfiguration &) const = default;
 };
 } // namespace
@@ -48,6 +51,50 @@ int main() {
   check(original.aspectRatio == rt64_defaults.aspectRatio &&
             original.downsampleMultiplier == rt64_defaults.downsampleMultiplier,
         "original keeps RT64's window fit");
+
+  using Antialiasing = Rt64UserConfiguration::Antialiasing;
+  check(original.antialiasing == Antialiasing::MSAA8X,
+        "original with MSAA requests 8x MSAA");
+  n64_video::VideoOptions original_without_msaa{true};
+  original_without_msaa.anti_aliasing = n64_video::AntiAliasing::off;
+  Rt64UserConfiguration original_off;
+  n64_video::apply_to_rt64(original_without_msaa, original_off);
+  check(original_off.antialiasing == Antialiasing::None,
+        "original with anti-aliasing off keeps MSAA off");
+  check(enhanced.antialiasing == Antialiasing::None, "enhanced keeps MSAA off");
+
+  // Supported sample counts as RT64's device reports them: bit value = count.
+  constexpr unsigned counts_up_to_8 = 1U | 2U | 4U | 8U;
+  constexpr unsigned counts_up_to_4 = 1U | 2U | 4U;
+  constexpr unsigned counts_up_to_2 = 1U | 2U;
+  constexpr unsigned counts_8_without_4 = 1U | 8U;
+  check(n64_video::msaa_sample_count(counts_up_to_8, true) == 8,
+        "the fallback picks 8x when the device supports it");
+  check(n64_video::msaa_sample_count(counts_up_to_4, true) == 4,
+        "the fallback picks 4x without 8x");
+  check(n64_video::msaa_sample_count(counts_up_to_2, true) == 1,
+        "the fallback turns MSAA off without 4x or 8x");
+  check(n64_video::msaa_sample_count(counts_8_without_4, true) == 8,
+        "the fallback needs only 8x itself for 8x");
+  check(n64_video::msaa_sample_count(counts_up_to_8, false) == 1,
+        "the fallback turns MSAA off without custom sample locations");
+
+  Rt64UserConfiguration limited_to_4 = original;
+  check(n64_video::limit_msaa_to_device(limited_to_4, counts_up_to_4, true) == 4 &&
+            limited_to_4.antialiasing == Antialiasing::MSAA4X,
+        "limiting to the device lowers 8x to 4x");
+  Rt64UserConfiguration limited_to_none = original;
+  check(n64_video::limit_msaa_to_device(limited_to_none, counts_up_to_2, true) == 1 &&
+            limited_to_none.antialiasing == Antialiasing::None,
+        "limiting to the device turns MSAA off without 4x");
+  Rt64UserConfiguration kept_8 = original;
+  check(n64_video::limit_msaa_to_device(kept_8, counts_up_to_8, true) == 8 &&
+            kept_8.antialiasing == Antialiasing::MSAA8X,
+        "limiting to the device keeps a supported 8x");
+  Rt64UserConfiguration not_requested = original_off;
+  check(n64_video::limit_msaa_to_device(not_requested, counts_up_to_8, true) == 1 &&
+            not_requested.antialiasing == Antialiasing::None,
+        "limiting to the device leaves MSAA off when it wasn't requested");
 
   // VI_CONTROL as a game sets it for a 16-bit framebuffer: divot on, dither
   // filter on, AA mode 0, colour type 2. Colour type 3 is a 32-bit framebuffer.

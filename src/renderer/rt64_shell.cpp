@@ -975,7 +975,7 @@ std::unique_ptr<Rt64Shell> Rt64Shell::create(
         }
         impl->application->userConfig.developerMode =
             configuration.developer_mode;
-        n64_video::apply_to_rt64(video_core_options(configuration),
+        jfg::apply_video_options(configuration,
             impl->application->userConfig);
         // JFG draws CPU overlays into the buffer selected by the N64 VI.
         // Skipping to a newer rendered buffer can display it before those edits.
