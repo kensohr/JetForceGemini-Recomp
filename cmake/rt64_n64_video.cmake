@@ -1,8 +1,9 @@
 # Video core (src/renderer/n64_video) RT64 patch: a native-resolution VI
 # pre-pass that reduces a 16-bit frame to the console's dithered 16-bit
-# colour, then runs the VI's anti-aliasing, dither filter and divot filter and
-# resamples each row of a 16- or 32-bit frame to the active scanline width,
-# before RT64's VI pass applies gamma and scales it to the window.
+# colour, then runs the VI's anti-aliasing, dither filter and divot filter,
+# resamples each row of a 16- or 32-bit frame to the active scanline width and
+# adds the VI's gamma-dither noise, before RT64's VI pass applies gamma and
+# scales it to the window.
 #
 # VI anti-aliasing and the divot filter need each pixel's RDP coverage, which
 # RT64 doesn't produce, so the patch also reaches past the VI pass:
@@ -39,8 +40,8 @@ function(jfg_n64_video_patch_contents relative)
 #ifdef PIXEL_ANTIALIASING]==] [==[#ifdef VI_PREPASS
 // Native-resolution VI pre-pass: one invocation per output sample of each
 // framebuffer row. It reduces a 16-bit frame to the RDP's 16-bit colour, runs
-// VI anti-aliasing or the dither filter, then the divot filter, and resamples
-// the row to the active scanline width.
+// VI anti-aliasing or the dither filter, then the divot filter, resamples
+// the row to the active scanline width and adds gamma-dither noise.
 
 // RDP colour-dither matrices, indexed by ((y & 3) << 2) | (x & 3). Same
 // values as RT64's DitherPatternMagicSquare and DitherPatternBayer.
@@ -174,6 +175,25 @@ int3 ViDivotPixel(int2 pixel) {
     return max(min(leftColor, centre), min(max(leftColor, centre), rightColor));
 }
 
+// Gamma-dither noise (n64_video/gamma_dither.hpp): lowbias32 chained through
+// the frame counter, the row and the sample gives three independent bits,
+// red, green and blue; each adds to its 8-bit channel, which stays at most
+// 255.
+uint ViGammaDitherHash(uint value) {
+    value ^= value >> 16;
+    value *= 0x7FEB352Du;
+    value ^= value >> 15;
+    value *= 0x846CA68Bu;
+    value ^= value >> 16;
+    return value;
+}
+
+int3 ViGammaDither(uint2 outputPixel, int3 color) {
+    const uint bits = ViGammaDitherHash(outputPixel.x + ViGammaDitherHash(outputPixel.y + ViGammaDitherHash(gConstants.noiseFrame)));
+    const int3 noise = int3(bits & 1u, (bits >> 1) & 1u, (bits >> 2) & 1u);
+    return min(color + noise, 255);
+}
+
 float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET {
     // The sample's position in framebuffer pixels, 2.10 fixed point. The VI
     // interpolates with the top 5 bits of the fraction.
@@ -185,6 +205,10 @@ float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET
         const int fraction = int((position >> 5) & 31);
         const int3 next = ViDivotPixel(pixel + int2(1, 0));
         color += ((next - color) * fraction + 16) >> 5;
+    }
+
+    if (gConstants.gammaDither != 0) {
+        color = ViGammaDither(outputPixel, color);
     }
 
     return float4(float3(color) / 255.0f, 1.0f);
@@ -201,7 +225,8 @@ float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET
         // fixed point) and the framebuffer size. With a coverage estimate the
         // input holds the front colour and coverage (coverageInput 1), with VI
         // anti-aliasing of partially covered pixels (AA modes 0 and 1) and the
-        // divot filter (0 or 1).
+        // divot filter (0 or 1). Gamma-dither noise (0 or 1) uses the
+        // pre-pass's frame counter.
         uint colourReduction;
         uint ditherPattern;
         uint ditherFilter;
@@ -212,7 +237,9 @@ float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET
         uint framebufferHeight;
         uint coverageInput;
         uint viAntiAliasing;
-        uint divot;]==])
+        uint divot;
+        uint gammaDither;
+        uint noiseFrame;]==])
     elseif(relative STREQUAL "CMakeLists.txt")
         jfg_rt64_patch_replace([==[build_pixel_shader(  rt64 "src/shaders/VideoInterfacePS.hlsl" "src/shaders/VideoInterfacePSPixel.hlsl" "-D PIXEL_ANTIALIASING")]==] [==[build_pixel_shader(  rt64 "src/shaders/VideoInterfacePS.hlsl" "src/shaders/VideoInterfacePSPixel.hlsl" "-D PIXEL_ANTIALIASING")
 build_pixel_shader(  rt64 "src/shaders/VideoInterfacePS.hlsl" "src/shaders/VideoInterfacePSPrepass.hlsl" "-D VI_PREPASS")]==])
@@ -276,6 +303,9 @@ build_compute_shader(rt64 "src/shaders/CoverageEstimateCS.hlsl")]==])
             std::unique_ptr<RenderFramebuffer> framebuffer;
             uint32_t width = 0;
             uint32_t height = 0;
+            // Advances once per presented frame, interpolated frames
+            // included, so the gamma-dither noise changes every frame.
+            uint32_t frameCounter = 0;
         };
         Prepass prepass;]==])
         jfg_rt64_patch_replace([==[            bool removeBlackBorders = false;]==] [==[            bool removeBlackBorders = false;
@@ -291,6 +321,7 @@ build_compute_shader(rt64 "src/shaders/CoverageEstimateCS.hlsl")]==])
         jfg_rt64_patch_replace([==[#include "shared/rt64_video_interface.h"]==] [==[#include "shared/rt64_video_interface.h"
 
 #include "n64_video/colour_reduction.hpp"
+#include "n64_video/gamma_dither.hpp"
 #include "n64_video/vi_filtering.hpp"]==])
         jfg_rt64_patch_replace([==[    void VIRenderer::render(const RenderParams &p) {]==] [==[    void VIRenderer::render(const RenderParams &frameParams) {
         // When the pre-pass runs, its native-resolution output replaces the
@@ -310,8 +341,8 @@ build_compute_shader(rt64 "src/shaders/CoverageEstimateCS.hlsl")]==])
         jfg_rt64_patch_replace([==[    void VIRenderer::getViewportAndScissor(]==] [==[    // Draws the frame into prepass.texture, one row per framebuffer row and
     // one column per sample of the active scanline: reduced to the console's
     // 16-bit colour (16-bit framebuffers only), anti-aliased or
-    // dither-filtered, divot-filtered and resampled as the video core decides
-    // from its options and the VI registers.
+    // dither-filtered, divot-filtered, resampled and given gamma-dither noise
+    // as the video core decides from its options and the VI registers.
     // Returns false, drawing nothing, when VI filtering is off or the VI shows
     // nothing.
     bool VIRenderer::renderPrepass(const RenderParams &p) {
@@ -375,6 +406,9 @@ build_compute_shader(rt64 "src/shaders/CoverageEstimateCS.hlsl")]==])
         pushConstants.coverageInput = (p.coverageTexture != nullptr) ? 1 : 0;
         pushConstants.viAntiAliasing = filtering.anti_aliasing ? 1 : 0;
         pushConstants.divot = filtering.divot ? 1 : 0;
+        n64_video::report_gamma_dither(viControl);
+        pushConstants.gammaDither = (filtering.gamma_dither == n64_video::GammaDither::noise) ? 1 : 0;
+        pushConstants.noiseFrame = prepass.frameCounter++;
 
         const ShaderRecord &shader = p.shaderLibrary->videoInterfacePrepass;
         p.commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(prepass.texture.get(), RenderTextureLayout::COLOR_WRITE));

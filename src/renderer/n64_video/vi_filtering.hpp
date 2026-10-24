@@ -20,9 +20,24 @@ enum class Resampling : std::uint32_t {
     replicate = 1,
 };
 
+// The VI's gamma-dither noise, from VI_CONTROL bits 2 (gamma dither) and 3
+// (gamma). Numbered as the VI pre-pass shader expects.
+enum class GammaDither : std::uint32_t {
+    // Bit 2 clear: no noise.
+    off = 0,
+    // Gamma dither without gamma: a random 0 or 1 added to each 8-bit channel
+    // of each output sample, after resampling (n64_video/gamma_dither.hpp).
+    noise = 1,
+    // Gamma dither with gamma: the hardware feeds the noise into the gamma
+    // table at 1/64 step, which RT64's 8-bit gamma after the pre-pass can't
+    // take, so no noise is added.
+    unsupported_with_gamma = 2,
+};
+
 // What the VI does to a framebuffer on its way to the TV, besides gamma: VI
 // anti-aliasing of partially covered pixels or the dither filter of fully
-// covered ones, the divot filter, then horizontal resampling to the scanline.
+// covered ones, the divot filter, horizontal resampling to the scanline, then
+// gamma-dither noise.
 struct ViFiltering {
     // Blend each partially covered (edge) pixel with a background the VI
     // reconstructs from its fully covered neighbours. Off, every pixel counts
@@ -40,6 +55,7 @@ struct ViFiltering {
     // both 2.10 fixed point.
     std::uint32_t x_step = 0;
     std::uint32_t x_offset = 0;
+    GammaDither gamma_dither = GammaDither::off;
 };
 
 // VI_CONTROL (VI_STATUS) bits 1:0 hold the framebuffer colour type: 0 blank,
@@ -48,6 +64,8 @@ inline constexpr std::uint32_t vi_control_type_mask = 0x3U;
 inline constexpr std::uint32_t vi_control_type_16_bit = 0x2U;
 inline constexpr std::uint32_t vi_control_type_32_bit = 0x3U;
 
+inline constexpr std::uint32_t vi_control_gamma_dither_bit = 1U << 2;
+inline constexpr std::uint32_t vi_control_gamma_bit = 1U << 3;
 inline constexpr std::uint32_t vi_control_divot_bit = 1U << 4;
 inline constexpr std::uint32_t vi_control_aa_mode_shift = 8;
 inline constexpr std::uint32_t vi_control_aa_mode_mask = 0x3U;
@@ -73,6 +91,14 @@ inline bool vi_filtering_enabled(const VideoOptions &options,
     return options.original_video_output && shows_framebuffer;
 }
 
+constexpr GammaDither gamma_dither(std::uint32_t vi_control) {
+    if ((vi_control & vi_control_gamma_dither_bit) == 0)
+        return GammaDither::off;
+    if ((vi_control & vi_control_gamma_bit) != 0)
+        return GammaDither::unsupported_with_gamma;
+    return GammaDither::noise;
+}
+
 inline ViFiltering vi_filtering(const ViRegisters &registers) {
     const std::uint32_t aa_mode =
         (registers.control >> vi_control_aa_mode_shift) & vi_control_aa_mode_mask;
@@ -91,6 +117,7 @@ inline ViFiltering vi_filtering(const ViRegisters &registers) {
     filtering.x_step = registers.x_scale & vi_x_scale_field_mask;
     filtering.x_offset =
         (registers.x_scale >> vi_x_scale_offset_shift) & vi_x_scale_field_mask;
+    filtering.gamma_dither = gamma_dither(registers.control);
     return filtering;
 }
 

@@ -33,6 +33,14 @@ rendering settings, a change applies on the next game launch.
   `(xOffset + i * xScale) / 1024` (`VI_X_SCALE`, 2.10 fixed point) and blends
   the two neighbouring pixels with the top 5 bits of the fraction, as the VI
   does. In AA mode 3 it repeats the nearest pixel instead.
+- **Gamma dither.** When `VI_CONTROL` sets gamma dither (bit 2) without
+  gamma (bit 3), as Jet Force Gemini's `0x13016` does, each output sample
+  gets a random 0 or 1 added to each 8-bit channel, independently per
+  channel; a channel at 255 stays there. This is the VI's last step, after
+  resampling. The bits come from a stateless integer hash of the sample's
+  position and a frame counter that advances once per presented frame
+  (interpolated frames included), so a still scene's noise changes every
+  frame, as each scan-out does on the console.
 - **Gamma**, from `VI_CONTROL`, as RT64 already applied it.
 - **VI anti-aliasing and the divot filter, from estimated coverage.** The
   console's RDP stores each pixel's coverage (how many of its 8 sub-samples
@@ -98,7 +106,9 @@ positions)` once the first frame is estimated.
   anti-aliasing.
 - **VI pre-pass**, in the VI's order: 16-bit reduction of the front colour;
   per pixel, VI anti-aliasing when it's partially covered, else the dither
-  filter; the divot filter when `VI_CONTROL` bit 4 is set; resampling; gamma.
+  filter; the divot filter when `VI_CONTROL` bit 4 is set; resampling;
+  gamma dither when `VI_CONTROL` bit 2 is set and bit 3 clear. RT64's VI
+  pass then applies gamma.
   - VI anti-aliasing: from the 6 neighbours at (-1,-1), (+1,-1), (-2,0),
     (+2,0), (-1,+1), (+1,+1) that are fully covered, per channel the
     penultimate maximum and minimum (the centre counted twice) stand for the
@@ -159,8 +169,14 @@ positions)` once the first frame is estimated.
   the mark.
 - **No vertical resampling.** Rows are scaled to the window as RT64 does; the
   VI's `VI_Y_SCALE` interpolation and interlacing aren't emulated.
-- **No gamma dither.** The VI's random low-bit noise (`VI_CONTROL` gamma
-  dither) isn't added.
+- **No gamma dither with gamma on.** When `VI_CONTROL` sets both gamma
+  dither and gamma (bits 2 and 3), the console feeds the noise into the gamma
+  table at 1/64 of a step. RT64 applies gamma after the 8-bit pre-pass, which
+  can't carry that, so no noise is added; this is logged once as a warning
+  with the `VI_CONTROL` value. Jet Force Gemini never sets it.
+- **Gamma-dither sequence.** The noise comes from a hash, not the VI's own
+  random generator, so its pattern differs from the console's; its size
+  (0 or 1 per channel) and frequency (about half the channels) match.
 - Pixels outside the framebuffer repeat its edge pixel; the console reads
   whatever memory lies next to it.
 
@@ -170,7 +186,7 @@ The emulation lives in the video core, `src/renderer/n64_video/`, which has no
 game-specific code and is configured only through `n64_video::VideoOptions`
 and the VI registers. Its decisions and reference arithmetic are in the core
 (`colour_reduction.hpp`, `vi_filtering.hpp`, `coverage_estimate.hpp`,
-`vi_anti_aliasing.hpp`).
+`vi_anti_aliasing.hpp`, `gamma_dither.hpp`).
 
 `cmake/rt64_n64_video.cmake` is its one RT64 patch. Every patched input is
 hash-checked against the pinned RT64, each patch site must exist, and each
@@ -199,4 +215,5 @@ unsupported count off, so a project lowers it with `limit_msaa_to_device`
 this from RT64's render init hook, which setup calls before its own MSAA
 check (`src/renderer/rt64_msaa_support.hpp`). A project reports the
 estimate's statuses, each with a debug or warning level, by setting
-`n64_video::coverage_log_sink()`.
+`n64_video::coverage_log_sink()`, and the unsupported gamma-dither warning
+by setting `n64_video::gamma_dither_log_sink()`.
