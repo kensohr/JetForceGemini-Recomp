@@ -118,6 +118,8 @@ def main() -> int:
     parser.add_argument("--workspace", type=Path, required=True)
     parser.add_argument("--dependency-root", type=Path, required=True)
     parser.add_argument("--jobs", type=int, default=8)
+    parser.add_argument("--native-spans", action="store_true",
+                        help="Apply the native timing spans the optimised build's pinned generators require")
     args = parser.parse_args()
     if sys.platform != "linux":
         parser.error("Run this stage inside WSL/Linux")
@@ -205,7 +207,8 @@ def main() -> int:
         "--raw-generated", str(transform / "generated"), "--symbols", str(transform / "symbols-private.toml"),
         "--original-context", str(context / "dump.toml"), "--runtime-manifest", str(transform / "runtime-link-private.json"),
         "--recomp-header", str(recomp / "include/recomp.h"), "--output", str(workspace / "normalized")])
-    original_timing.finish(workspace / "normalized", timing_sites, paired_transfers)
+    original_timing.finish(workspace / "normalized", timing_sites, paired_transfers,
+                           native_spans=args.native_spans)
     run("identify-sdk", [sys.executable, str(ROOT / "scripts/identify_libultra.py"),
         "--decomp-symbols", str(decomp / "ver/symbols/symbol_addrs.us.txt"),
         "--generated-symbols", str(transform / "symbols-private.toml"), "--private-out", str(workspace / "libultra.json")])

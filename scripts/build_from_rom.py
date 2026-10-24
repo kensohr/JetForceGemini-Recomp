@@ -15,6 +15,7 @@ import time
 import uuid
 from build_paths import windows_cache, check_binary_path
 from runtime_identity import write_identity
+import optimised_build
 
 ROOT = Path(__file__).resolve().parents[1]
 ROM_SHA1 = "493ced9008dbe932d6e91179b68e8630cf23a023"
@@ -68,6 +69,8 @@ def main() -> int:
                         help="Resume compilation in a local build whose ROM generation completed")
     parser.add_argument("--generation-timeout", type=int, default=3600,
                         help="Hard limit for the Linux subprocess group, in seconds")
+    parser.add_argument("--release-optimizations", action="store_true",
+                        help="Optimised build with the release optimisations of official releases")
     args = parser.parse_args()
     if os.name != "nt" or sys.version_info < (3, 11):
         parser.error("This prototype requires Windows x64 and Python 3.11 or newer.")
@@ -95,11 +98,15 @@ def main() -> int:
         for name, digest in generation["files"].items():
             if hashlib.sha256((workspace / name).read_bytes()).hexdigest() != digest:
                 raise ValueError("Generated build input changed; start a new build.")
+        optimised_build.check_resume(workspace, is_enabled=args.release_optimizations)
     else:
         workspace = cache / "w" / uuid.uuid4().hex[:12]
         workspace.mkdir(parents=True, exist_ok=False)
     build = check_binary_path(workspace / ("native" if args.resume_native and (workspace / "native").exists() else "n"))
+    if args.release_optimizations:
+        build = check_binary_path(workspace / optimised_build.BUILD_FOLDER)
     print("Local build workspace: " + str(workspace), flush=True)
+    optimised_build.announce(is_enabled=args.release_optimizations)
     status_file = workspace / "status.json"
     records: list[dict] = (json.loads(status_file.read_text()).get("steps", [])
                            if args.resume_native and status_file.is_file() else [])
@@ -163,9 +170,10 @@ def main() -> int:
             str(args.generation_timeout) + "s", "python3",
             wsl_path(ROOT / "scripts/generate_from_rom.py"), "--rom", wsl_path(rom),
             "--workspace", wsl_path(workspace), "--dependency-root", wsl_path(deps),
-            "--jobs", str(args.jobs)])
+            "--jobs", str(args.jobs)] + optimised_build.generate_arguments(is_enabled=args.release_optimizations))
     generated = workspace / "normalized"
-    run("configure", [cmake, "-S", str(ROOT), "-B", str(build),
+    run("configure", [cmake, *optimised_build.configure_arguments(ROOT, is_enabled=args.release_optimizations),
+        "-S", str(ROOT), "-B", str(build),
         "-G", "Visual Studio 17 2022", "-A", "x64", "-DBUILD_TESTING=OFF", "-DJFG_SUPPORT_SYMBOLS=ON",
         "-DJFG_MSVC_GENERATED_COMPILE_JOBS=" + str(args.jobs),
         "-DJFG_ENABLE_GENERATED_CODE=ON", "-DJFG_BUILD_PHASE6_NATIVE_BOOT=ON",
