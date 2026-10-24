@@ -305,15 +305,15 @@ int main() {
 
   // Each status is reported once: the estimate at debug level, each fallback
   // as a warning, with the values that caused it.
-  using n64_video::CoverageLogLevel;
-  check(n64_video::coverage_status_log_level(CoverageStatus::estimating) == CoverageLogLevel::debug,
+  using n64_video::LogLevel;
+  check(n64_video::coverage_status_log_level(CoverageStatus::estimating) == LogLevel::debug,
         "a running estimate is logged at debug level");
-  check(n64_video::coverage_status_log_level(CoverageStatus::no_msaa) == CoverageLogLevel::warning &&
+  check(n64_video::coverage_status_log_level(CoverageStatus::no_msaa) == LogLevel::warning &&
             n64_video::coverage_status_log_level(CoverageStatus::scaled_resolution) ==
-                CoverageLogLevel::warning &&
+                LogLevel::warning &&
             n64_video::coverage_status_log_level(CoverageStatus::downsampled) ==
-                CoverageLogLevel::warning &&
-            n64_video::coverage_status_log_level(CoverageStatus::no_depth) == CoverageLogLevel::warning,
+                LogLevel::warning &&
+            n64_video::coverage_status_log_level(CoverageStatus::no_depth) == LogLevel::warning,
         "fallbacks are logged as warnings");
   auto mentions = [](const std::string &message, const char *value) {
     return message.find(value) != std::string::npos;

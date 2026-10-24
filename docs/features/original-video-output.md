@@ -216,7 +216,9 @@ Under Original, `apply_to_rt64` requests 8x MSAA. RT64 only turns an
 unsupported count off, so a project lowers it with `limit_msaa_to_device`
 (`msaa.hpp` holds the fallback) once the device exists: Jet Force Gemini does
 this from RT64's render init hook, which setup calls before its own MSAA
-check (`src/renderer/rt64_msaa_support.hpp`). A project reports the
-estimate's statuses, each with a debug or warning level, by setting
-`n64_video::coverage_log_sink()`, and the unsupported gamma-dither warning
-by setting `n64_video::gamma_dither_log_sink()`.
+check (`src/renderer/rt64_msaa_support.hpp`). The core reports to a project
+through one sink, `n64_video::log_sink()` (`n64_video/log_sink.hpp`), which
+takes a core log level (info, warning or debug) and a message: the
+estimate's statuses at debug or warning, and the unsupported gamma-dither
+warning. A project sets it once, before RT64 starts rendering; reports while
+it is unset are dropped.

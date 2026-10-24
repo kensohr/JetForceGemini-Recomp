@@ -1,5 +1,6 @@
 #pragma once
 #include "coverage_layout.h"
+#include "log_sink.hpp"
 #include "vi_anti_aliasing.hpp"
 #include <algorithm>
 #include <array>
@@ -323,18 +324,13 @@ inline CoverageStatus coverage_status(const CoverageTarget &target) {
     return CoverageStatus::estimating;
 }
 
-enum class CoverageLogLevel {
-    debug,
-    warning,
-};
-
 // A running estimate is routine; every other status is a fallback.
-constexpr CoverageLogLevel coverage_status_log_level(CoverageStatus status) {
-    return (status == CoverageStatus::estimating) ? CoverageLogLevel::debug : CoverageLogLevel::warning;
+constexpr LogLevel coverage_status_log_level(CoverageStatus status) {
+    return (status == CoverageStatus::estimating) ? LogLevel::debug : LogLevel::warning;
 }
 
-// The message the RT64 side reports, once per status and run, with the
-// values that decided it.
+// The message the RT64 side reports to log_sink(), once per status and run,
+// with the values that decided it.
 inline std::string coverage_status_message(CoverageStatus status, const CoverageTarget &target) {
     const std::string samples = std::to_string(target.sample_count) + "x MSAA";
     const std::string fallback = "; showing the averaged colour at full coverage";
@@ -362,14 +358,6 @@ inline std::string coverage_status_message(CoverageStatus status, const Coverage
         break;
     }
     return "";
-}
-
-// Where the RT64 side reports coverage statuses. A project sets it before
-// RT64 starts rendering; without one, they are dropped.
-using CoverageLogSink = void (*)(CoverageLogLevel level, const char *message);
-inline CoverageLogSink &coverage_log_sink() {
-    static CoverageLogSink sink = nullptr;
-    return sink;
 }
 
 } // namespace n64_video

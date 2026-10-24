@@ -97,10 +97,14 @@ int main() {
   };
   // Reported before a project sets the sink: dropped, but the once-per-run
   // warning stays available for when the sink is set.
-  n64_video::gamma_dither_log_sink() = nullptr;
+  n64_video::log_sink() = nullptr;
   report(0x1301EU);
   static std::vector<std::string> warnings;
-  n64_video::gamma_dither_log_sink() = [](const char *message) { warnings.emplace_back(message); };
+  static std::vector<n64_video::LogLevel> levels;
+  n64_video::log_sink() = [](n64_video::LogLevel level, const char *message) {
+    levels.push_back(level);
+    warnings.emplace_back(message);
+  };
   report(0x13016U);
   report(0x13012U);
   check(warnings.empty(), "supported gamma-dither settings aren't reported");
@@ -110,7 +114,9 @@ int main() {
   check(warnings.size() == 1, "gamma with gamma dither is reported once per run");
   check(!warnings.empty() && warnings.front().find("0x1301E") != std::string::npos,
         "the warning names the VI_CONTROL value");
-  n64_video::gamma_dither_log_sink() = nullptr;
+  check(levels.size() == 1 && levels.front() == n64_video::LogLevel::warning,
+        "gamma with gamma dither is reported as a warning");
+  n64_video::log_sink() = nullptr;
 
   std::cout << "N64 video gamma dither checks: " << failures << " failures\n";
   return failures ? 1 : 0;
