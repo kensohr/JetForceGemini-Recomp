@@ -12,7 +12,7 @@
 #include "rt64_f3ddkr.hpp"
 #include "frame_diagnostics.hpp"
 #include "rt64_cpu_overlay.hpp"
-#include "n64_video/rt64_configuration.hpp"
+#include "rt64_video_options.hpp"
 
 #include "hle/rt64_application.h"
 #include "hle/rt64_vi.h"
@@ -410,16 +410,6 @@ bool CaptureContext::finish() noexcept {
         return false;
     }
 }
-
-namespace {
-n64_video::VideoOptions video_core_options(
-    const Rt64ShellConfiguration& configuration) noexcept {
-    n64_video::VideoOptions options;
-    options.original_video_output =
-        configuration.video_output == VideoOutput::original;
-    return options;
-}
-} // namespace
 
 struct Rt64Shell::Impl {
     std::array<std::uint8_t, kRt64RequiredHeaderBytes> header{};

@@ -139,16 +139,9 @@ int main(int argc, char **argv) {
   check(!IsWindowEnabled(GetDlgItem(window, IDC_VIDEO_FPS_EDIT)) &&
             !IsWindowEnabled(GetDlgItem(window, IDC_VIDEO_WINDOW_SIZE)),
         "irrelevant controls disabled");
-  check(SendDlgItemMessageW(window, IDC_VIDEO_OUTPUT, CB_GETCURSEL, 0, 0) == 0 &&
-            accepted.rendering.output == jfg::VideoOutput::enhanced,
-        "default video output is Enhanced");
-  choose(IDC_VIDEO_OUTPUT, 1);
-  apply();
-  check(applies == 3 && accepted.rendering.output == jfg::VideoOutput::original,
-        "Apply returns Original video output");
   choose(IDC_VIDEO_FRAME_MODE, 0);
   SendMessageW(window, WM_COMMAND, IDCANCEL, 0);
-  check(applies == 3 && !IsWindow(window) &&
+  check(applies == 2 && !IsWindow(window) &&
             model.settings.rendering.mode == jfg::FrameRateMode::unlimited,
         "Cancel discards unapplied changes");
   const auto config = output / L"video-settings-unicode-\u03a9.ini";
@@ -164,8 +157,6 @@ int main(int argc, char **argv) {
   check(SendDlgItemMessageW(window, IDC_VIDEO_FRAME_MODE, CB_GETCURSEL, 0, 0) ==
             2,
         "reopen retains applied mode");
-  check(SendDlgItemMessageW(window, IDC_VIDEO_OUTPUT, CB_GETCURSEL, 0, 0) == 1,
-        "reopen retains applied video output");
   model.apply = [](const auto &, std::wstring &error) {
     error = L"Simulated write failure";
     return false;
@@ -178,7 +169,7 @@ int main(int argc, char **argv) {
     return true;
   };
   SendMessageW(window, WM_COMMAND, IDOK, 0);
-  check(applies == 4 && !IsWindow(window), "OK saves and closes");
+  check(applies == 3 && !IsWindow(window), "OK saves and closes");
   DestroyWindow(owner);
   std::cout << "Native video dialog checks: " << failures
             << " failures; artifact " << output.string() << '\n';

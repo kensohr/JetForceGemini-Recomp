@@ -78,23 +78,6 @@ int main() {
   check(jfg::parse_video_settings(legacy+"remove_fog=0\n")->fog_percent==100);
   for(const auto* bad:{"fog_percent=101\n","fog_percent=-1\n","fog_percent=50x\n","remove_fog=1\nfog_percent=50\n"})
     check(!jfg::parse_video_settings(legacy+bad));
-  check(migrated && migrated->output == jfg::VideoOutput::enhanced);
-  for (auto output : {jfg::VideoOutput::enhanced, jfg::VideoOutput::original}) {
-    jfg::VideoSettings choice{};
-    choice.output = output;
-    const auto restored = jfg::parse_video_settings(jfg::serialize_video_settings(choice));
-    check(restored && restored->output == output);
-  }
-  check(jfg::parse_video_settings(legacy + "video_output=original\n")->output ==
-        jfg::VideoOutput::original);
-  for (const auto *bad : {"video_output=\n", "video_output=Original\n", "video_output=native\n",
-                          "video_output=original\nvideo_output=enhanced\n"})
-    check(!jfg::parse_video_settings(legacy + bad));
-  {
-    jfg::VideoSettings invalid{};
-    invalid.output = static_cast<jfg::VideoOutput>(2);
-    check(!jfg::valid_video_settings(invalid));
-  }
   jfg::configure_fog_strength(100);
   jfg::configure_native_blur(jfg::BlurMode::reduced);
   jfg::configure_presentation_policy(true, false);

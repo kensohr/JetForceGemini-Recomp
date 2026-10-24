@@ -28,7 +28,7 @@ static void pointer(const char *id) {
   for(auto* parent=e;parent;parent=parent->GetParentNode()) {
     const auto card=parent->GetId();
     const char* tab=nullptr;
-    if(card=="video-card-mode"||card=="video-card-size"||card=="video-card-output"||card=="video-card-pause")tab="video-tab-display";
+    if(card=="video-card-mode"||card=="video-card-size"||card=="video-card-pause")tab="video-tab-display";
     else if(card=="video-card-vsync"||card=="video-card-blur")tab="video-tab-rendering";
     else if(card=="video-card-fps"||card=="video-card-cap")tab="video-tab-framerate";
     else if(card=="video-card-fog")tab="video-tab-enhance";
@@ -199,57 +199,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     demand(!jfg::frontend::valid_video_request(request), "reject invalid blur protocol");
     request.blur = 1; request.version = 1;
     demand(!jfg::frontend::valid_video_request(request), "reject old protocol layout");
-    request.version = 4;
-    demand(!jfg::frontend::valid_video_request(request), "reject protocol without video output");
-    request = {};
-    demand(request.version == 5 && request.video_output == 0, "default request carries Enhanced");
-    request.video_output = 1;
-    demand(jfg::frontend::valid_video_request(request), "Original video output protocol valid");
-    request.video_output = 2;
-    demand(!jfg::frontend::valid_video_request(request), "reject invalid video output protocol");
     MSG close{};
     auto accepted = [&] {
       demand(PeekMessageW(&close, window, WM_CLOSE, WM_CLOSE, PM_REMOVE) != 0,
              "Apply accepts and closes");
     };
-    pointer("video-tab-display");
-    demand(element("video-card-output")->IsVisible(true), "Video output is on the Display tab");
-    demand(ui.draft.rendering.output == jfg::VideoOutput::enhanced &&
-               element("video-output-enhanced")->IsClassSet("selected") &&
-               !element("video-output-original")->IsClassSet("selected"),
-           "old file shows Enhanced video output");
-    pointer("video-output-original");
-    demand(ui.draft.rendering.output == jfg::VideoOutput::original && ui.dirty() &&
-               element("video-output-original")->IsClassSet("selected") &&
-               element("video-dirty-display")->IsVisible(true),
-           "Original video output changes the Display draft");
-    surface->context->ProcessMouseMove(0, 0, 0);
-    capture("display.tga");
-    ui.running = true;
-    ui.refresh();
-    settle();
-    demand(element("video-restart")->IsVisible(true), "video output needs a game restart");
-    ui.running = false;
-    pointer("video-output-enhanced");
-    demand(!ui.dirty(), "returning to Enhanced clears dirty state");
-    search->SetValue("native resolution");
-    Rml::Dictionary outputQuery;
-    outputQuery["value"] = std::string("native resolution");
-    search->DispatchEvent("change", outputQuery);
-    settle();
-    demand(element("video-card-output")->IsVisible(true) && !element("video-card-fog")->IsVisible(true),
-           "search finds video output");
-    pointer("video-tab-display");
-    pointer("video-output-original");
-    pointer("video-apply");
-    accepted();
-    demand(jfg::load_video_settings(profile / "video.ini")->output == jfg::VideoOutput::original,
-           "Apply persists Original video output");
-    pointer("video-output-enhanced");
-    pointer("video-apply");
-    accepted();
-    demand(jfg::load_video_settings(profile / "video.ini")->output == jfg::VideoOutput::enhanced,
-           "Apply persists Enhanced video output");
     demand(!element("video-apply")->HasAttribute("disabled"),
            "Apply can accept unchanged values");
     pointer("video-apply");
