@@ -27,9 +27,13 @@ inline void apply_video_options(const Rt64ShellConfiguration& configuration,
         log_original_video_output(LogLevel::info, "MSAA off (JFG_VI_AA=off)");
     if (n64_video::estimates_coverage(options)) {
         log_original_video_output(LogLevel::info,
-            "VI anti-aliasing and divot filter from estimated coverage (JFG_VI_AA=coverage)");
-        n64_video::coverage_log_sink() = [](const char* message) {
-            log_original_video_output(LogLevel::debug, message);
+            "VI anti-aliasing and divot filter from estimated coverage (JFG_VI_AA=coverage); "
+            "MSAA resolves take RT64's raster path");
+        n64_video::coverage_log_sink() = [](n64_video::CoverageLogLevel level, const char* message) {
+            const LogLevel log_level = level == n64_video::CoverageLogLevel::warning
+                ? LogLevel::warning
+                : LogLevel::debug;
+            log_original_video_output(log_level, message);
         };
     }
     n64_video::apply_to_rt64(options, user_configuration);

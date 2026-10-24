@@ -10,42 +10,12 @@
 # names, so another project's RT64 can take the same patch; only these CMake
 # helpers carry this project's jfg_ prefix.
 
-# Replaces one patch site in `contents`; a missing site fails the build.
-function(jfg_n64_video_replace before after)
-    string(FIND "${contents}" "${before}" offset)
-    if(offset EQUAL -1)
-        message(FATAL_ERROR "Missing video core RT64 patch site: ${before}")
-    endif()
-    string(REPLACE "${before}" "${after}" contents "${contents}")
-    set(contents "${contents}" PARENT_SCOPE)
-endfunction()
-
-# Splits an "a|b" pair from an input list into two variables.
-function(jfg_n64_video_split_pair pair first_variable second_variable)
-    string(REPLACE "|" ";" fields "${pair}")
-    list(GET fields 0 first)
-    list(GET fields 1 second)
-    set(${first_variable} "${first}" PARENT_SCOPE)
-    set(${second_variable} "${second}" PARENT_SCOPE)
-endfunction()
-
-# Fails the build unless `relative` in the pinned RT64 checkout still has the
-# audited content. The hash is of the LF-normalised file, so an LF and a CRLF
-# checkout both match it (cmake/rt64_vi_presentation.cmake hashes raw bytes and
-# so lists the CRLF hash of rt64_vi_renderer.cpp separately).
-function(jfg_n64_video_check_input original_root relative expected)
-    file(READ "${original_root}/${relative}" pinned)
-    string(REPLACE "\r\n" "\n" pinned "${pinned}")
-    string(SHA256 digest "${pinned}")
-    if(NOT digest STREQUAL expected)
-        message(FATAL_ERROR "Pinned video core RT64 input changed: ${relative}")
-    endif()
-endfunction()
+include("${CMAKE_CURRENT_LIST_DIR}/rt64_patch_helpers.cmake")
 
 # Applies the patches for `relative` to `contents`.
 function(jfg_n64_video_patch_contents relative)
     if(relative STREQUAL "src/shaders/VideoInterfacePS.hlsl")
-        jfg_n64_video_replace([==[float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET {
+        jfg_rt64_patch_replace([==[float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET {
 #ifdef PIXEL_ANTIALIASING]==] [==[#ifdef VI_PREPASS
 // Native-resolution VI pre-pass: one invocation per output sample of each
 // framebuffer row. It reduces a 16-bit frame to the RDP's 16-bit colour, runs
@@ -128,7 +98,7 @@ float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET
 #ifdef PIXEL_ANTIALIASING]==])
         string(APPEND contents "\n#endif // VI_PREPASS\n")
     elseif(relative STREQUAL "src/shared/rt64_video_interface.h")
-        jfg_n64_video_replace([==[        float gamma;]==] [==[        float gamma;
+        jfg_rt64_patch_replace([==[        float gamma;]==] [==[        float gamma;
         // VI pre-pass: 16-bit colour reduction (0 or 1), RDP colour-dither
         // pattern (0 magic square, 1 Bayer), VI dither filter (0 or 1),
         // resampling (0 interpolate, 1 replicate), X step and offset (2.10
@@ -142,18 +112,18 @@ float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET
         uint framebufferWidth;
         uint framebufferHeight;]==])
     elseif(relative STREQUAL "CMakeLists.txt")
-        jfg_n64_video_replace([==[build_pixel_shader(  rt64 "src/shaders/VideoInterfacePS.hlsl" "src/shaders/VideoInterfacePSPixel.hlsl" "-D PIXEL_ANTIALIASING")]==] [==[build_pixel_shader(  rt64 "src/shaders/VideoInterfacePS.hlsl" "src/shaders/VideoInterfacePSPixel.hlsl" "-D PIXEL_ANTIALIASING")
+        jfg_rt64_patch_replace([==[build_pixel_shader(  rt64 "src/shaders/VideoInterfacePS.hlsl" "src/shaders/VideoInterfacePSPixel.hlsl" "-D PIXEL_ANTIALIASING")]==] [==[build_pixel_shader(  rt64 "src/shaders/VideoInterfacePS.hlsl" "src/shaders/VideoInterfacePSPixel.hlsl" "-D PIXEL_ANTIALIASING")
 build_pixel_shader(  rt64 "src/shaders/VideoInterfacePS.hlsl" "src/shaders/VideoInterfacePSPrepass.hlsl" "-D VI_PREPASS")]==])
     elseif(relative STREQUAL "src/render/rt64_shader_library.h")
-        jfg_n64_video_replace([==[        ShaderRecord videoInterfacePixel;]==] [==[        ShaderRecord videoInterfacePixel;
+        jfg_rt64_patch_replace([==[        ShaderRecord videoInterfacePixel;]==] [==[        ShaderRecord videoInterfacePixel;
         ShaderRecord videoInterfacePrepass;]==])
     elseif(relative STREQUAL "src/render/rt64_shader_library.cpp")
         foreach(prefix_format IN ITEMS "#include|spirv" "#   include|dxil" "#   include|metal")
-            jfg_n64_video_split_pair("${prefix_format}" prefix format)
-            jfg_n64_video_replace("${prefix} \"shaders/VideoInterfacePSPixel.hlsl.${format}.h\""
+            jfg_rt64_patch_split_pair("${prefix_format}" prefix format)
+            jfg_rt64_patch_replace("${prefix} \"shaders/VideoInterfacePSPixel.hlsl.${format}.h\""
                 "${prefix} \"shaders/VideoInterfacePSPixel.hlsl.${format}.h\"\n${prefix} \"shaders/VideoInterfacePSPrepass.hlsl.${format}.h\"")
         endforeach()
-        jfg_n64_video_replace([==[            videoInterfacePixel.pipeline = device->createGraphicsPipeline(pipelineDesc);]==] [==[            videoInterfacePixel.pipeline = device->createGraphicsPipeline(pipelineDesc);
+        jfg_rt64_patch_replace([==[            videoInterfacePixel.pipeline = device->createGraphicsPipeline(pipelineDesc);]==] [==[            videoInterfacePixel.pipeline = device->createGraphicsPipeline(pipelineDesc);
 
             // VI pre-pass: reads the frame with Load, so the nearest sampler
             // only fixes the descriptor layout.
@@ -167,7 +137,7 @@ build_pixel_shader(  rt64 "src/shaders/VideoInterfacePS.hlsl" "src/shaders/Video
             pipelineDesc.pipelineLayout = videoInterfacePrepass.pipelineLayout.get();
             videoInterfacePrepass.pipeline = device->createGraphicsPipeline(pipelineDesc);]==])
     elseif(relative STREQUAL "src/render/rt64_vi_renderer.h")
-        jfg_n64_video_replace([==[        const RenderSampler *descriptorSetSampler = nullptr;]==] [==[        const RenderSampler *descriptorSetSampler = nullptr;
+        jfg_rt64_patch_replace([==[        const RenderSampler *descriptorSetSampler = nullptr;]==] [==[        const RenderSampler *descriptorSetSampler = nullptr;
 
         // The VI pre-pass's native-resolution output and its input binding.
         struct Prepass {
@@ -178,18 +148,18 @@ build_pixel_shader(  rt64 "src/shaders/VideoInterfacePS.hlsl" "src/shaders/Video
             uint32_t height = 0;
         };
         Prepass prepass;]==])
-        jfg_n64_video_replace([==[            bool removeBlackBorders = false;]==] [==[            bool removeBlackBorders = false;
+        jfg_rt64_patch_replace([==[            bool removeBlackBorders = false;]==] [==[            bool removeBlackBorders = false;
             // The framebuffer the VI pass draws into, rebound after the
             // pre-pass. Without it the pre-pass doesn't run.
             const RenderFramebuffer *framebuffer = nullptr;]==])
-        jfg_n64_video_replace([==[        void render(const RenderParams &p);]==] [==[        void render(const RenderParams &p);
+        jfg_rt64_patch_replace([==[        void render(const RenderParams &p);]==] [==[        void render(const RenderParams &p);
         bool renderPrepass(const RenderParams &p);]==])
     elseif(relative STREQUAL "src/render/rt64_vi_renderer.cpp")
-        jfg_n64_video_replace([==[#include "shared/rt64_video_interface.h"]==] [==[#include "shared/rt64_video_interface.h"
+        jfg_rt64_patch_replace([==[#include "shared/rt64_video_interface.h"]==] [==[#include "shared/rt64_video_interface.h"
 
 #include "n64_video/colour_reduction.hpp"
 #include "n64_video/vi_filtering.hpp"]==])
-        jfg_n64_video_replace([==[    void VIRenderer::render(const RenderParams &p) {]==] [==[    void VIRenderer::render(const RenderParams &frameParams) {
+        jfg_rt64_patch_replace([==[    void VIRenderer::render(const RenderParams &p) {]==] [==[    void VIRenderer::render(const RenderParams &frameParams) {
         // When the pre-pass runs, its native-resolution output replaces the
         // frame this pass scales to the window.
         RenderParams p = frameParams;
@@ -201,10 +171,10 @@ build_pixel_shader(  rt64 "src/shaders/VideoInterfacePS.hlsl" "src/shaders/Video
             videoResolution = hlslpp::float2(float(prepass.width), float(prepass.height));
         }
 ]==])
-        jfg_n64_video_replace([==[        interop::VideoInterfaceCB pushConstants;
+        jfg_rt64_patch_replace([==[        interop::VideoInterfaceCB pushConstants;
         pushConstants.videoResolution = computeHDSize(hlslpp::float2(p.vi->fbSize()), p.resolutionScale, p.downsamplingScale);]==] [==[        interop::VideoInterfaceCB pushConstants = {};
         pushConstants.videoResolution = videoResolution;]==])
-        jfg_n64_video_replace([==[    void VIRenderer::getViewportAndScissor(]==] [==[    // Draws the frame into prepass.texture, one row per framebuffer row and
+        jfg_rt64_patch_replace([==[    void VIRenderer::getViewportAndScissor(]==] [==[    // Draws the frame into prepass.texture, one row per framebuffer row and
     // one column per sample of the active scanline: reduced to the console's
     // 16-bit colour (16-bit framebuffers only), dither-filtered and resampled
     // as the video core decides from its options and the VI registers.
@@ -279,7 +249,7 @@ build_pixel_shader(  rt64 "src/shaders/VideoInterfacePS.hlsl" "src/shaders/Video
 
     void VIRenderer::getViewportAndScissor(]==])
     elseif(relative STREQUAL "src/hle/rt64_present_queue.cpp")
-        jfg_n64_video_replace([==[                    renderParams.removeBlackBorders = removeBlackBorders;]==] [==[                    renderParams.removeBlackBorders = removeBlackBorders;
+        jfg_rt64_patch_replace([==[                    renderParams.removeBlackBorders = removeBlackBorders;]==] [==[                    renderParams.removeBlackBorders = removeBlackBorders;
                     renderParams.framebuffer = swapChainFramebuffer;]==])
     else()
         message(FATAL_ERROR "No video core RT64 patch for ${relative}")
@@ -300,19 +270,12 @@ function(jfg_n64_video_patch_source_view original_root source_view)
         "src/render/rt64_shader_library.cpp|72421375b232d5449f2f90f153c8452420084f43809c3234bc9727eddfde6ffd"
         "src/render/rt64_vi_renderer.h|b03a6ea437eefc7a86f163ab72fa04b800ada5b9aa4fc7a15cf60a01378a3bc1")
     foreach(input IN LISTS inputs)
-        jfg_n64_video_split_pair("${input}" relative expected)
-        jfg_n64_video_check_input("${original_root}" "${relative}" "${expected}")
+        jfg_rt64_patch_split_pair("${input}" relative expected)
+        jfg_rt64_patch_check_input("video core" "${original_root}" "${relative}" "${expected}")
         file(READ "${original_root}/${relative}" contents)
         string(REPLACE "\r\n" "\n" contents "${contents}")
         jfg_n64_video_patch_contents("${relative}")
-        set(destination "${source_view}/${relative}")
-        set(existing "")
-        if(EXISTS "${destination}")
-            file(READ "${destination}" existing)
-        endif()
-        if(NOT existing STREQUAL contents)
-            file(WRITE "${destination}" "${contents}")
-        endif()
+        jfg_rt64_patch_write("${source_view}/${relative}" "${contents}")
     endforeach()
 endfunction()
 
@@ -322,38 +285,9 @@ endfunction()
 # every other patch of these units. `core_include` is the folder that holds
 # n64_video/.
 function(jfg_n64_video_patch_rt64_target original_root core_include)
-    set(inputs
+    jfg_rt64_patch_target_units("video core" "${original_root}" jfg_n64_video_patch_contents
+        "${CMAKE_CURRENT_BINARY_DIR}/generated/rt64-n64-video"
         "src/render/rt64_vi_renderer.cpp|0159b441fd4872ef30a49d7603f4570d8858084004c20dd6646f51039241fa7b"
         "src/hle/rt64_present_queue.cpp|023dc3f4bc74bf6863e37ad1781fb32eaa543a7713bd8b9a3757b2262a1a1e52")
-    foreach(input IN LISTS inputs)
-        jfg_n64_video_split_pair("${input}" relative expected)
-        jfg_n64_video_check_input("${original_root}" "${relative}" "${expected}")
-        get_filename_component(basename "${relative}" NAME)
-        get_target_property(sources rt64 SOURCES)
-        set(patched_sources)
-        set(compiled_unit "")
-        foreach(unit IN LISTS sources)
-            get_filename_component(unit_name "${unit}" NAME)
-            if(unit_name STREQUAL basename)
-                set(compiled_unit "${unit}")
-            else()
-                list(APPEND patched_sources "${unit}")
-            endif()
-        endforeach()
-        if(compiled_unit STREQUAL "")
-            message(FATAL_ERROR "RT64 target is missing ${relative}")
-        endif()
-        if(NOT IS_ABSOLUTE "${compiled_unit}")
-            get_target_property(rt64_source_dir rt64 SOURCE_DIR)
-            set(compiled_unit "${rt64_source_dir}/${compiled_unit}")
-        endif()
-        file(READ "${compiled_unit}" contents)
-        string(REPLACE "\r\n" "\n" contents "${contents}")
-        jfg_n64_video_patch_contents("${relative}")
-        set(generated "${CMAKE_CURRENT_BINARY_DIR}/generated/rt64-n64-video/${basename}")
-        file(WRITE "${generated}" "${contents}")
-        list(APPEND patched_sources "${generated}")
-        set_property(TARGET rt64 PROPERTY SOURCES "${patched_sources}")
-    endforeach()
     target_include_directories(rt64 PRIVATE "${core_include}")
 endfunction()

@@ -32,15 +32,15 @@ namespace RT64 {
         // records estimates.
         uint64_t coverageFrame = 0;
 
-        void reportOnce(n64_video::CoverageEvent event) {
-            static std::array<std::atomic<bool>, size_t(n64_video::CoverageEvent::count)> reported = {};
-            if (reported[size_t(event)].exchange(true)) {
+        void reportOnce(n64_video::CoverageStatus status, const n64_video::CoverageTarget &target) {
+            static std::array<std::atomic<bool>, size_t(n64_video::CoverageStatus::count)> reported = {};
+            if (reported[size_t(status)].exchange(true)) {
                 return;
             }
 
             const n64_video::CoverageLogSink sink = n64_video::coverage_log_sink();
             if (sink != nullptr) {
-                sink(n64_video::coverage_event_message(event));
+                sink(n64_video::coverage_status_log_level(status), n64_video::coverage_status_message(status, target).c_str());
             }
         }
 
@@ -99,6 +99,22 @@ namespace RT64 {
         valid = false;
     }
 
+    bool writesCoverageRecord(const RenderMultisampling &multisampling) {
+        return n64_video::estimates_coverage(n64_video::active_options()) && (multisampling.sampleCount > 1);
+    }
+
+    bool coverageRecordNeedsRasterResolve() {
+        return n64_video::estimates_coverage(n64_video::active_options());
+    }
+
+    float coverageRecordAlphaRange(bool usesHDR) {
+        if (!n64_video::estimates_coverage(n64_video::active_options())) {
+            return 0.0f;
+        }
+
+        return usesHDR ? AlphaRange16Bit : AlphaRange8Bit;
+    }
+
     void beginCoverageEstimateFrame() {
         coverageFrame++;
     }
@@ -112,9 +128,10 @@ namespace RT64 {
 
         CoverageEstimate &coverage = colorTarget->coverageEstimate;
         coverage.valid = false;
-        const n64_video::CoverageUnavailable unavailable = n64_video::coverage_unavailable(coverageTarget(multisampling, *colorTarget));
-        if (unavailable != n64_video::CoverageUnavailable::none) {
-            reportOnce(n64_video::coverage_event(unavailable));
+        const n64_video::CoverageTarget target = coverageTarget(multisampling, *colorTarget);
+        const n64_video::CoverageStatus status = n64_video::coverage_status(target);
+        if (status != n64_video::CoverageStatus::estimating) {
+            reportOnce(status, target);
             return;
         }
 
@@ -122,7 +139,7 @@ namespace RT64 {
             (depthTarget->width >= colorTarget->width) && (depthTarget->height >= colorTarget->height);
         const bool storedFrontValid = !useDepth && (coverage.frontSamplesFrame == coverageFrame);
         if (!useDepth && !storedFrontValid) {
-            reportOnce(n64_video::CoverageEvent::no_depth);
+            reportOnce(n64_video::CoverageStatus::no_depth, target);
         }
 
         setupTextures(worker, coverage, colorTarget->width, colorTarget->height);
@@ -182,7 +199,7 @@ namespace RT64 {
         }
 
         coverage.valid = true;
-        reportOnce(n64_video::CoverageEvent::estimating);
+        reportOnce(n64_video::CoverageStatus::estimating, target);
     }
 
     void copyCoverageEstimate(RenderWorker *worker, RenderTarget *dstTarget, RenderTarget *srcTarget) {

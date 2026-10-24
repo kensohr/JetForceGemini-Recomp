@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <iostream>
 #include <iterator>
+#include <string>
 
 int main() {
   unsigned failures = 0;
@@ -128,8 +129,8 @@ int main() {
   check(n64_video::sample_pixel_offset_bits(pattern_8x) == 0xEE44U,
         "sample pixel offsets pack two bits per sample");
 
-  // Per-sample render-mode record: what the RDP would do with coverage for
-  // the draw that wrote the sample.
+  // Per-sample render-mode record: an anti-aliased draw marks the samples it
+  // covers in the colour target's alpha, next to RT64's own coverage value.
   using n64_video::CoverageDestination;
   using n64_video::DrawCoverageMode;
   using n64_video::SampleRecord;
@@ -139,40 +140,103 @@ int main() {
   const DrawCoverageMode opaque_clamp{CoverageDestination::clamp, false, false};
   const DrawCoverageMode cloud{CoverageDestination::save, false, false};
   const DrawCoverageMode aa_translucent{CoverageDestination::wrap, true, false};
-  check(n64_video::sample_record(aa_opaque, 1.0f) == SampleRecord{true, 8},
-        "an anti-aliased draw records partial coverage");
-  check(n64_video::sample_record(aa_cut_out, 0.5f) == SampleRecord{true, 4},
-        "coverage times alpha scales the sample's coverage");
-  check(n64_video::sample_record(aa_cut_out, 0.0f) == SampleRecord{true, 0},
-        "coverage times alpha with alpha 0 contributes nothing");
-  check(n64_video::sample_record(opaque, 1.0f) == SampleRecord{false, 8},
-        "CVG_DST_FULL forces full coverage");
-  check(n64_video::sample_record({CoverageDestination::full, true, true}, 0.25f) ==
-            SampleRecord{false, 8},
-        "CVG_DST_FULL forces full coverage even with AA and alpha");
-  check(n64_video::sample_record(opaque_clamp, 1.0f) == SampleRecord{false, 8},
-        "without AA_EN a clamped draw writes full coverage");
-  check(!n64_video::sample_record(cloud, 1.0f).has_value(),
-        "CVG_DST_SAVE keeps the coverage under it");
-  check(!n64_video::sample_record(aa_translucent, 1.0f).has_value(),
-        "CVG_DST_WRAP keeps the coverage under it (documented deviation)");
-  check(n64_video::sample_record({CoverageDestination::clamp, true, false, true}, 1.0f) ==
-            SampleRecord{false, 8},
-        "copy and fill draws write full coverage");
+  const DrawCoverageMode aa_translucent_alpha{CoverageDestination::wrap, true, true};
+  const DrawCoverageMode fill{CoverageDestination::clamp, true, false, true};
+  check(n64_video::records_partial(aa_opaque) && n64_video::records_partial(aa_cut_out),
+        "an anti-aliased clamped draw records partial coverage");
+  check(!n64_video::records_partial(opaque) && !n64_video::records_partial(opaque_clamp) &&
+            !n64_video::records_partial({CoverageDestination::full, true, true}),
+        "CVG_DST_FULL and draws without AA_EN record a full pixel");
+  check(!n64_video::records_partial(fill), "copy and fill draws record a full pixel");
+  check(!n64_video::records_partial(cloud) && !n64_video::records_partial(aa_translucent),
+        "CVG_DST_SAVE and CVG_DST_WRAP add nothing to what lies under them");
 
-  // The record rides in the colour target's alpha above RT64's own coverage
-  // value, whose low 3 bits RT64 writes back to RDRAM: value = rt64 + 8 * code.
-  for (const SampleRecord record : {SampleRecord{true, 8}, SampleRecord{false, 0},
-                                    SampleRecord{true, 3}, SampleRecord{false, 8}}) {
-    const unsigned value = n64_video::encode_sample_record(7, record);
-    check((value & 7U) == 7 && n64_video::decode_sample_record(value) == record &&
-              value <= n64_video::sample_record_max_value,
-          "a record round-trips and keeps RT64's low coverage bits");
+  // RT64's alpha arithmetic, per sample, in units of the alpha (1/255): a
+  // CVG_DST_SAVE or CVG_DST_WRAP draw adds its shader output to the stored
+  // value, any other draw replaces it. `output` is what RT64's raster shader
+  // writes: 7 for a full sample, round(8 * alpha) under CVG_X_ALPHA (clamped
+  // to 7 for CVG_DST_CLAMP), 0 for SAVE.
+  constexpr unsigned alpha_range = 255;
+  auto blend = [](unsigned stored, const DrawCoverageMode &mode, unsigned output) {
+    const bool additive = (mode.destination == CoverageDestination::save) ||
+                          (mode.destination == CoverageDestination::wrap);
+    return std::min(additive ? stored + output : output, alpha_range);
+  };
+  struct Draw {
+    DrawCoverageMode mode;
+    unsigned output;
+  };
+  // Under `msaa` the sample holds RT64's value alone; under `coverage` the
+  // raster shader adds the record. The value RT64 reads back (resolve,
+  // RDRAM, framebuffer textures) must be the same.
+  auto msaa_and_coverage = [&](std::initializer_list<Draw> draws) {
+    unsigned msaa = 0;
+    unsigned coverage = 0;
+    for (const Draw &draw : draws) {
+      msaa = blend(msaa, draw.mode, draw.output);
+      coverage = blend(coverage, draw.mode, n64_video::record_sample_alpha(draw.output, draw.mode));
+    }
+    return std::array<unsigned, 2>{msaa, n64_video::rt64_coverage_value(coverage, alpha_range)};
+  };
+  auto rt64_value_kept = [&](std::initializer_list<Draw> draws) {
+    const auto values = msaa_and_coverage(draws);
+    return values[0] == values[1];
+  };
+  check(rt64_value_kept({{aa_opaque, 7}}) && rt64_value_kept({{aa_cut_out, 3}}) &&
+            rt64_value_kept({{opaque, 7}}) && rt64_value_kept({{fill, 7}}),
+        "RT64's coverage value reads back unchanged under the record");
+  check(rt64_value_kept({{aa_opaque, 7}, {aa_translucent, 8}}) &&
+            rt64_value_kept({{aa_opaque, 7}, {aa_translucent_alpha, 4}, {aa_translucent_alpha, 5}}),
+        "CVG_DST_WRAP adds RT64's coverage on top of an anti-aliased sample as under msaa");
+  check(rt64_value_kept({{opaque, 7}, {aa_translucent_alpha, 3}}) &&
+            rt64_value_kept({{aa_translucent, 8}}),
+        "CVG_DST_WRAP over a full or empty sample matches msaa");
+  check(rt64_value_kept({{aa_cut_out, 2}, {cloud, 0}}),
+        "CVG_DST_SAVE leaves RT64's value as under msaa");
+  // RT64's resolve averages the samples' values and writes bit 2 of the
+  // rounded result back as the 16-bit pixel's coverage bit. An edge pixel
+  // half covered by an anti-aliased draw over a full surface: per sample the
+  // values read back match, so the averaged bit does too.
+  {
+    unsigned msaa_sum = 0;
+    unsigned coverage_sum = 0;
+    for (unsigned s = 0; s < 8; s++) {
+      const Draw edge = (s < 4) ? Draw{aa_opaque, 7} : Draw{opaque, 7};
+      const auto values = msaa_and_coverage({{opaque, 7}, edge, {aa_translucent_alpha, s}});
+      msaa_sum += values[0];
+      coverage_sum += values[1];
+    }
+    check(msaa_sum == coverage_sum, "an averaged edge pixel resolves as under msaa");
   }
-  check(n64_video::decode_sample_record(7) == SampleRecord{false, 8},
-        "alpha without a record (RDRAM load, clear) reads as full coverage");
-  check(n64_video::decode_sample_record(255) == SampleRecord{false, 8},
-        "an out-of-range alpha reads as full coverage");
+  check(n64_video::rt64_coverage_value(alpha_range, alpha_range) == alpha_range &&
+            n64_video::rt64_coverage_value(65535, 65535) == 65535,
+        "alpha loaded from RDRAM or cleared to full stays as it is");
+
+  // What the estimate reads from a sample: whether its front draw
+  // anti-aliased, and the eighths of the sample it covered (RT64's value; 7,
+  // RT64's full sample, counts as all 8).
+  auto record_of = [&](std::initializer_list<Draw> draws) {
+    unsigned coverage = 0;
+    for (const Draw &draw : draws)
+      coverage = blend(coverage, draw.mode, n64_video::record_sample_alpha(draw.output, draw.mode));
+    return n64_video::decode_sample_record(coverage, alpha_range);
+  };
+  check(record_of({{aa_opaque, 7}}) == SampleRecord{true, 8},
+        "an anti-aliased sample reads as partial and fully covered");
+  check(record_of({{aa_cut_out, 4}}) == SampleRecord{true, 4},
+        "coverage times alpha scales the sample's coverage");
+  check(record_of({{opaque, 7}}) == SampleRecord{false, 8} &&
+            record_of({{opaque_clamp, 7}}) == SampleRecord{false, 8},
+        "a full or non-anti-aliased sample reads as a full pixel");
+  check(record_of({{opaque_clamp, 3}}) == SampleRecord{false, 3},
+        "a non-anti-aliased cut-out keeps its alpha coverage");
+  check(record_of({{aa_cut_out, 3}, {cloud, 0}}) == SampleRecord{true, 3},
+        "CVG_DST_SAVE keeps the record under it");
+  check(record_of({{aa_cut_out, 3}, {aa_translucent, 8}}) == SampleRecord{true, 8},
+        "CVG_DST_WRAP adds its coverage, clamped to the full sample (documented deviation)");
+  check(record_of({}) == SampleRecord{false, 8} &&
+            n64_video::decode_sample_record(alpha_range, alpha_range) == SampleRecord{false, 8},
+        "alpha without a draw (clear, RDRAM load) reads as a full pixel");
 
   // Front surface: samples within 8 * dz of the front-most one, dz the local
   // depth slope from the neighbouring pixels (the smaller difference per axis,
@@ -225,23 +289,48 @@ int main() {
 
   // Where coverage can't be estimated, the frame falls back to the averaged
   // colour at full coverage.
-  using n64_video::CoverageUnavailable;
-  check(n64_video::coverage_unavailable({8, true, 1.0f, 1.0f, 1}) == CoverageUnavailable::none,
+  using n64_video::CoverageStatus;
+  check(n64_video::coverage_status({8, true, 1.0f, 1.0f, 1}) == CoverageStatus::estimating,
         "8x MSAA at native resolution estimates coverage");
-  check(n64_video::coverage_unavailable({4, true, 1.0f, 1.0f, 1}) == CoverageUnavailable::none,
+  check(n64_video::coverage_status({4, true, 1.0f, 1.0f, 1}) == CoverageStatus::estimating,
         "4x MSAA estimates coverage");
-  check(n64_video::coverage_unavailable({1, false, 1.0f, 1.0f, 1}) == CoverageUnavailable::no_msaa,
+  check(n64_video::coverage_status({1, false, 1.0f, 1.0f, 1}) == CoverageStatus::no_msaa,
         "without MSAA there's no coverage");
-  check(n64_video::coverage_unavailable({8, true, 2.0f, 2.0f, 1}) ==
-            CoverageUnavailable::scaled_resolution,
+  check(n64_video::coverage_status({8, true, 2.0f, 2.0f, 1}) == CoverageStatus::scaled_resolution,
         "a resolution scale other than 1 isn't estimated");
-  check(n64_video::coverage_unavailable({8, true, 1.33f, 1.0f, 1}) ==
-            CoverageUnavailable::scaled_resolution,
+  check(n64_video::coverage_status({8, true, 1.33f, 1.0f, 1}) == CoverageStatus::scaled_resolution,
         "an aspect scale other than 1 isn't estimated");
-  check(n64_video::coverage_unavailable({8, true, 1.0f, 1.0f, 2}) ==
-            CoverageUnavailable::downsampled,
+  check(n64_video::coverage_status({8, true, 1.0f, 1.0f, 2}) == CoverageStatus::downsampled,
         "downsampling isn't estimated");
 
+  // Each status is reported once: the estimate at debug level, each fallback
+  // as a warning, with the values that caused it.
+  using n64_video::CoverageLogLevel;
+  check(n64_video::coverage_status_log_level(CoverageStatus::estimating) == CoverageLogLevel::debug,
+        "a running estimate is logged at debug level");
+  check(n64_video::coverage_status_log_level(CoverageStatus::no_msaa) == CoverageLogLevel::warning &&
+            n64_video::coverage_status_log_level(CoverageStatus::scaled_resolution) ==
+                CoverageLogLevel::warning &&
+            n64_video::coverage_status_log_level(CoverageStatus::downsampled) ==
+                CoverageLogLevel::warning &&
+            n64_video::coverage_status_log_level(CoverageStatus::no_depth) == CoverageLogLevel::warning,
+        "fallbacks are logged as warnings");
+  auto mentions = [](const std::string &message, const char *value) {
+    return message.find(value) != std::string::npos;
+  };
+  check(mentions(n64_video::coverage_status_message(CoverageStatus::estimating, {8, true, 1.0f, 1.0f, 1}),
+                 "8x"),
+        "the estimate's message names the sample count");
+  check(mentions(n64_video::coverage_status_message(CoverageStatus::no_msaa, {2, true, 1.0f, 1.0f, 1}),
+                 "2x"),
+        "the no-MSAA message names the sample count");
+  check(mentions(n64_video::coverage_status_message(CoverageStatus::scaled_resolution,
+                                                    {8, true, 1.33f, 2.0f, 1}),
+                 "1.33 x 2.00"),
+        "the scaled-resolution message names the scale");
+  check(mentions(n64_video::coverage_status_message(CoverageStatus::downsampled, {8, true, 1.0f, 1.0f, 3}),
+                 "3"),
+        "the downsampling message names the multiplier");
   std::cout << "N64 video coverage checks: " << failures << " failures\n";
   return failures ? 1 : 0;
 }

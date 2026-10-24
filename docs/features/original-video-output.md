@@ -107,21 +107,33 @@ The console's RDP stores each pixel's coverage (how many of its 8
 sub-samples the surface covers) next to its colour, and the VI uses it. This
 option estimates that coverage from RT64's MSAA samples and runs the VI's own
 filters on it. The game log says `VI anti-aliasing and divot filter from
-estimated coverage (JFG_VI_AA=coverage)`, then the MSAA count, and at debug
-level `coverage estimate running` once the first frame is estimated.
+estimated coverage (JFG_VI_AA=coverage); MSAA resolves take RT64's raster
+path`, then the MSAA count, and at debug level `coverage estimate running
+(8x MSAA at the RDP's sample positions)` once the first frame is estimated.
 
 - **Sample positions.** RT64 renders with 8x MSAA at the RDP's 8 sample
   positions (4 sub-scanlines, x 0 and 4/8 on rows 0 and 2, 2/8 and 6/8 on
   rows 1 and 3). Because RT64 draws the RDP's pixel corner at the rendered
   pixel's centre, half of each RDP pixel's samples land in the rendered
   pixels to its right and below; the estimate gathers them from there.
-- **Render mode per sample.** Every draw records in the colour target's
-  alpha, per covered sample, what the RDP would do with coverage: partial
-  coverage for anti-aliased draws (`AA_EN` with `CVG_DST_CLAMP`), full for
-  `CVG_DST_FULL`, copy, fill and non-anti-aliased draws, the coverage under it
-  for `CVG_DST_SAVE` (clouds, particles), and coverage times alpha under
-  `CVG_X_ALPHA` (cut-outs such as foliage). RT64's own coverage bits, which it
-  writes back to RDRAM, stay below the record.
+- **Render mode per sample.** RT64 already keeps a coverage value per sample
+  in the colour target's alpha: a full sample, coverage times alpha under
+  `CVG_X_ALPHA` (cut-outs such as foliage), added to under `CVG_DST_WRAP`,
+  kept under `CVG_DST_SAVE` (clouds, particles). On top of it, anti-aliased
+  draws (`AA_EN` with `CVG_DST_CLAMP`) mark the samples they cover as partial
+  coverage; `CVG_DST_FULL`, copy, fill and non-anti-aliased draws leave them
+  unmarked (a full pixel), and `CVG_DST_SAVE` and `CVG_DST_WRAP` keep the mark
+  of the draw under them.
+- **RT64's coverage bits are unchanged.** The mark is a value (128/255) far
+  above RT64's own, so it never touches the low 3 bits RT64 writes back to
+  RDRAM, and every resolve takes it off each sample before averaging. RDRAM
+  writebacks, framebuffers read as textures and colour-to-depth copies then
+  see the same coverage bits as under `msaa`. To take the mark off, resolves
+  always use RT64's raster resolve (its own path when hardware resolve is off,
+  and RT64's default on NVIDIA under D3D12); where `msaa` would use a
+  hardware resolve, the two can round an average differently, as RT64's
+  hardware resolve setting does. The mark is written only with MSAA, the only
+  case with a resolve.
 - **Coverage and colour.** After each framebuffer pair, a compute pass finds
   each pixel's front surface: the nearest sample by depth plus every sample
   within 8 times the local depth slope of it, the RDP's own tolerance for
@@ -148,7 +160,8 @@ Known deviations of `coverage`:
 
 - **Coverage from depth, not per primitive.** The RDP accumulates coverage
   primitive by primitive, blending surfaces within its depth tolerance; the
-  estimate groups the finished samples by depth once. The tolerance uses the
+  estimate groups the finished samples by depth once, a best effort. The
+  tolerance uses the
   depth slope of the neighbouring pixels (per axis the smaller difference, so
   a silhouette on one side doesn't widen it), not each primitive's own. Thin
   geometry with another surface on both sides (one-pixel railings) gets a
@@ -158,9 +171,13 @@ Known deviations of `coverage`:
   what the RDP stores; the colour the draw blends in still enters the front
   colour.
 - **`CVG_DST_WRAP`** (translucent anti-aliased surfaces, anti-aliased decals)
-  keeps the coverage under it too. The RDP adds coverage modulo 8, so on the
-  console a translucent edge drawn over a fully covered surface gets partial
-  coverage and is anti-aliased; here it isn't.
+  keeps the mark under it, and its coverage adds to the sample's, clamped to
+  a full sample. The RDP adds coverage modulo 8, so on the console a
+  translucent edge drawn over a fully covered surface gets partial coverage
+  and is anti-aliased; here it isn't.
+- **`CVG_X_ALPHA`** coverage comes from RT64's value, round(8 x alpha), which
+  RT64 caps at 7, its value for a full sample. So alpha from about 0.81 up
+  covers the whole sample instead of 7/8 of it.
 - **Decals and non-anti-aliased draws** are drawn whole when they cover the
   top-left sample; their edge pixels take that sample's colour.
 - **4x fallback.** Without 8x MSAA, RT64 uses 4 of the RDP's positions, one
@@ -169,15 +186,15 @@ Known deviations of `coverage`:
 - **Pairs without a depth target** (2D passes) reuse the front surface the
   frame's last pair with depth found; if there is none, every sample counts
   as front and coverage comes from the draws' render modes only. This is
-  logged once at debug level.
+  logged once as a warning.
 - **Where the estimate can't run** (MSAA unavailable, a resolution or aspect
   scale other than 1, downsampling), the frame shows the averaged colour at
-  full coverage, as `msaa` does; each cause is logged once at debug level.
-- **RDRAM coverage bits.** The colour written back to RDRAM, and a
-  framebuffer read as a 16-bit texture, still carry RT64's coverage bit, but
-  on edge pixels it is computed from the average of the samples' records, so
-  it can differ from `msaa`. A 32-bit framebuffer's alpha byte carries the
-  record (Jet Force Gemini draws to a 16-bit framebuffer).
+  full coverage, as `msaa` does; each cause is logged once as a warning with
+  the sample count, scale or downsample multiplier that caused it.
+- **Coverage bits after 16 translucent layers.** A sample takes the mark off
+  exactly while RT64's value stays below 128, which it passes only after 16
+  full-coverage `CVG_DST_WRAP` draws on the same sample since the last opaque
+  one; from there its read-back coverage bits can differ from `msaa`.
 
 ## For other RT64 projects
 
@@ -202,9 +219,13 @@ The `coverage` option is a second, separate patch,
 can take the MSAA option alone. Its decisions and reference arithmetic are in
 the core (`coverage_estimate.hpp`, `vi_anti_aliasing.hpp`, and the AA and
 divot bits in `vi_filtering.hpp`); the files it adds to RT64 (the estimate
-compute shader, the raster shader's record, the per-target estimate) are in
+compute shader, the raster shader's mark, the per-target estimate) are in
 `src/renderer/n64_video/rt64_patch/`. The patch extends the raster shader,
 its frame parameters and sample positions, `RenderTarget`, the shader
 library, the workload queue (one estimate per framebuffer pair, copied to
-interpolation targets), the present queue and the VI pre-pass. A project
-reports the estimate's events by setting `n64_video::coverage_log_sink()`.
+interpolation targets), the present queue and the VI pre-pass, and makes
+resolves take the mark off (`TextureResolvePS`, `TextureCopyCB`,
+`RenderTarget`). The mark's layout is defined once in
+`n64_video/coverage_layout.h`, which the core includes as C++ and the
+patch's shaders as HLSL. A project reports the estimate's statuses, each
+with a debug or warning level, by setting `n64_video::coverage_log_sink()`.

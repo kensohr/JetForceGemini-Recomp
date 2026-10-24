@@ -39,7 +39,8 @@ namespace RT64 {
     // Owned by a RenderTarget. Valid from the estimate after the pair that
     // last wrote the target until anything marks the target for resolve.
     struct CoverageEstimate {
-        // rgb: front-surface colour; a: coverage as the RDP stores it / 255.
+        // rgb: front-surface colour; a: coverage as the RDP stores it /
+        // EstimateCoverageScale (n64_video/coverage_layout.h).
         std::unique_ptr<RenderTexture> estimate;
         // The front surface's samples, one bit per sample.
         std::unique_ptr<RenderTexture> frontSamples;
@@ -56,6 +57,20 @@ namespace RT64 {
 
         void release();
     };
+
+    // Whether the raster shader marks anti-aliased samples in colour targets
+    // drawn with `multisampling`: under the coverage option, and only with
+    // MSAA, because only a resolve takes the mark off before RT64 reads the
+    // target.
+    bool writesCoverageRecord(const RenderMultisampling &multisampling);
+
+    // Whether resolves must take RT64's raster path, which takes the mark off
+    // each sample before averaging; a hardware resolve can't.
+    bool coverageRecordNeedsRasterResolve();
+
+    // The alpha range a resolve takes the mark off at, or 0 when no colour
+    // target carries it.
+    float coverageRecordAlphaRange(bool usesHDR);
 
     // Starts a frame's recording on the workload thread: descriptor sets of
     // the previous frame may be reused.

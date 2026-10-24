@@ -5,18 +5,21 @@
 // file to RT64's src/shaders/.
 //
 // It follows the reference in n64_video/coverage_estimate.hpp
-// (front_depth_tolerance, front_surface_mask, decode_sample_record,
-// pixel_coverage); keep the two in step.
+// (front_depth_tolerance, front_surface_mask, pixel_coverage); keep the two
+// in step. The record's layout and decoding are shared with it through
+// rt64_coverage_layout.h (n64_video/coverage_layout.h).
 //
 
 #include "shared/rt64_coverage_estimate_params.h"
+#include "shared/rt64_coverage_layout.h"
 
 #define BLOCK_SIZE 8
 
 [[vk::push_constant]] ConstantBuffer<CoverageEstimateCB> gConstants : register(b0);
 Texture2DMS<float4> gColor : register(t1);
 Texture2DMS<float> gDepth : register(t2);
-// rgb: front-surface colour; a: coverage as the RDP stores it (0-7) / 255.
+// rgb: front-surface colour; a: coverage as the RDP stores it (0-7) /
+// EstimateCoverageScale.
 RWTexture2D<float4> gEstimate : register(u3);
 // The front surface's samples, one bit per sample. Read back by pairs
 // without a depth target; the format lets Vulkan read it without
@@ -24,29 +27,20 @@ RWTexture2D<float4> gEstimate : register(u3);
 [[vk::image_format("r32ui")]] RWTexture2D<uint> gFrontSamples : register(u4);
 
 static const uint MaxSamples = 8;
-static const uint SampleFullEighths = 8;
-static const uint RecordCodeCount = 2 * (SampleFullEighths + 1);
-static const uint Rt64CoverageBits = 3;
 
 struct SampleRecord {
     bool partial;
     uint eighths;
 };
 
-// The record a draw left in the sample's alpha (CoverageRecord.hlsli); a
-// sample without one counts as a full pixel.
+// What the draws left in the sample's alpha (CoverageRecord.hlsli), as
+// n64_video::decode_sample_record reads it.
 SampleRecord DecodeSampleRecord(float alpha) {
     const uint value = uint(round(saturate(alpha) * gConstants.alphaRange));
-    const uint code = value >> Rt64CoverageBits;
+    const uint fullValue = uint(gConstants.alphaRange);
     SampleRecord record;
-    record.partial = false;
-    record.eighths = SampleFullEighths;
-    if ((code != 0) && (code <= RecordCodeCount)) {
-        const uint index = code - 1;
-        record.partial = index > SampleFullEighths;
-        record.eighths = index % (SampleFullEighths + 1);
-    }
-
+    record.partial = IsPartialRecord(value, fullValue);
+    record.eighths = SampleEighths(Rt64CoverageValue(value, fullValue));
     return record;
 }
 
@@ -156,5 +150,5 @@ void CSMain(uint2 coord : SV_DispatchThreadID) {
         }
     }
 
-    gEstimate[coord] = float4(colour / float(colourSamples), float(coverage) / 255.0f);
+    gEstimate[coord] = float4(colour / float(colourSamples), float(coverage) / EstimateCoverageScale);
 }

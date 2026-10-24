@@ -1,11 +1,13 @@
 #pragma once
+#include "coverage_layout.h"
 #include "vi_anti_aliasing.hpp"
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <iterator>
-#include <optional>
+#include <string>
 
 // Estimating the RDP's per-pixel coverage from MSAA samples, so the VI's own
 // anti-aliasing and divot filter can run on it. These are the reference for
@@ -137,7 +139,7 @@ struct DrawCoverageMode {
     bool copy_or_fill = false;
 };
 
-// What a draw leaves in one MSAA sample for the estimate.
+// What the estimate reads from one MSAA sample.
 struct SampleRecord {
     // The draw anti-aliases: the pixel's coverage is the share of samples it
     // covers. Otherwise the pixel is drawn whole when its top-left sample is
@@ -151,61 +153,41 @@ struct SampleRecord {
     }
 };
 
-inline constexpr unsigned sample_full_eighths = 8;
+inline constexpr unsigned sample_full_eighths = coverage_layout::SampleFullEighths;
 
-// The record a draw writes into a sample it covers, or nothing when it keeps
-// the record already there. CVG_DST_SAVE keeps it, as the RDP keeps the
-// stored coverage. CVG_DST_WRAP keeps it too: the RDP adds coverage modulo 8,
-// which a per-sample record can't reproduce; translucent anti-aliased
-// surfaces then leave the coverage of what they're drawn over. RT64 blends
-// these two destinations' alpha additively, so the record can only be kept,
-// whatever the cycle type.
-inline std::optional<SampleRecord> sample_record(const DrawCoverageMode &mode, float alpha) {
-    switch (mode.destination) {
-    case CoverageDestination::save:
-    case CoverageDestination::wrap:
-        return std::nullopt;
-    case CoverageDestination::full:
-        return SampleRecord{false, sample_full_eighths};
-    case CoverageDestination::clamp:
-        break;
-    }
-    if (mode.copy_or_fill)
-        return SampleRecord{false, sample_full_eighths};
-    const float clamped_alpha = std::clamp(alpha, 0.0f, 1.0f);
-    const unsigned eighths = mode.coverage_times_alpha
-        ? unsigned(std::lround(clamped_alpha * float(sample_full_eighths)))
-        : sample_full_eighths;
-    return SampleRecord{mode.anti_aliased, eighths};
+// The record rides in the colour target's alpha with RT64's own coverage
+// value, which stays exactly as RT64 computes it (coverage_layout.h). RT64
+// already stores the sample's eighths there (7 for a full sample,
+// round(8 * alpha) under CVG_X_ALPHA, CVG_DST_WRAP adding, CVG_DST_SAVE
+// keeping); the record adds only whether the draw anti-aliases.
+//
+// Whether a draw marks its samples as anti-aliased: AA_EN with
+// CVG_DST_CLAMP, except copy and fill. CVG_DST_FULL, draws without AA_EN,
+// copy and fill write a full pixel. CVG_DST_SAVE and CVG_DST_WRAP add nothing:
+// RT64 blends these destinations' alpha additively, so the record of the
+// draw under them stays. The coverage patch's CoverageRecord.hlsli repeats
+// this rule on RT64's other mode.
+constexpr bool records_partial(const DrawCoverageMode &mode) {
+    return (mode.destination == CoverageDestination::clamp) && mode.anti_aliased && !mode.copy_or_fill;
 }
 
-// The record is stored in the colour target's alpha, above RT64's own
-// coverage value: value = rt64_value + 8 * code, in units of the target's
-// alpha (1/255, or 1/65535 with HDR). RT64 writes the low 3 bits back to
-// RDRAM as the pixel's coverage bit, so they stay as RT64 computes them.
-// Code 0 means no record (the alpha was written outside a raster draw, by a
-// clear or a load from RDRAM); codes 1-9 are a full-pixel record with 0-8
-// eighths, codes 10-18 a partial one.
-inline constexpr unsigned sample_record_code_count = 2 * (sample_full_eighths + 1);
-inline constexpr unsigned rt64_coverage_bits = 3;
-inline constexpr unsigned rt64_coverage_mask = (1U << rt64_coverage_bits) - 1;
-inline constexpr unsigned sample_record_max_value =
-    rt64_coverage_mask + (sample_record_code_count << rt64_coverage_bits);
-
-constexpr unsigned encode_sample_record(unsigned rt64_value, SampleRecord record) {
-    const unsigned code = 1 + record.eighths + (record.partial ? (sample_full_eighths + 1) : 0);
-    return (rt64_value & rt64_coverage_mask) | (code << rt64_coverage_bits);
+// The alpha value the raster shader writes for a sample, from RT64's own
+// output for it (in units of the alpha).
+constexpr unsigned record_sample_alpha(unsigned rt64_output, const DrawCoverageMode &mode) {
+    return records_partial(mode) ? rt64_output + coverage_layout::PartialRecordMarker : rt64_output;
 }
 
-// A sample without a valid record counts as a full pixel.
-constexpr SampleRecord decode_sample_record(unsigned value) {
-    const unsigned code = value >> rt64_coverage_bits;
-    if ((code == 0) || (code > sample_record_code_count))
-        return SampleRecord{false, sample_full_eighths};
-    const unsigned index = code - 1;
-    return SampleRecord{index > sample_full_eighths, index % (sample_full_eighths + 1)};
+// RT64's coverage value of a stored alpha value, the record taken off.
+// `full_value` is the alpha range (255, or 65535 with HDR).
+constexpr unsigned rt64_coverage_value(unsigned stored, unsigned full_value) {
+    return coverage_layout::Rt64CoverageValue(stored, full_value);
 }
 
+// What the estimate reads from a stored alpha value.
+constexpr SampleRecord decode_sample_record(unsigned stored, unsigned full_value) {
+    return SampleRecord{coverage_layout::IsPartialRecord(stored, full_value),
+                        coverage_layout::SampleEighths(rt64_coverage_value(stored, full_value))};
+}
 // --- Front surface ----------------------------------------------------------
 
 // The front-most depth of the pixel and of its four neighbours (each the
@@ -304,17 +286,23 @@ PixelCoverage pixel_coverage(const Records &records, const MsaaSamplePattern &pa
     return result;
 }
 
-// --- Availability ---------------------------------------------------------------
+// --- Availability and diagnostics ----------------------------------------------
 
-// Why a frame can't estimate coverage; it then shows the averaged colour at
-// full coverage.
-enum class CoverageUnavailable {
-    none,
+// Whether a frame estimates coverage, and if not, why; it then shows the
+// averaged colour at full coverage.
+enum class CoverageStatus : unsigned {
+    estimating,
     // MSAA off, or without the RDP's sample positions.
     no_msaa,
     // The estimate reads one rendered pixel per RDP pixel.
     scaled_resolution,
     downsampled,
+    // A framebuffer pair without a depth target and no front surface from
+    // an earlier pair of the same frame: every sample counts as front, so
+    // the coverage comes from the draws' records alone. Set by the RT64 side,
+    // which knows the pair.
+    no_depth,
+    count,
 };
 
 struct CoverageTarget {
@@ -325,70 +313,60 @@ struct CoverageTarget {
     unsigned downsample_multiplier = 1;
 };
 
-inline CoverageUnavailable coverage_unavailable(const CoverageTarget &target) {
+inline CoverageStatus coverage_status(const CoverageTarget &target) {
     if ((msaa_sample_pattern(target.sample_count).count == 0) || !target.rdp_sample_positions)
-        return CoverageUnavailable::no_msaa;
+        return CoverageStatus::no_msaa;
     if ((target.resolution_scale_x != 1.0f) || (target.resolution_scale_y != 1.0f))
-        return CoverageUnavailable::scaled_resolution;
+        return CoverageStatus::scaled_resolution;
     if (target.downsample_multiplier > 1)
-        return CoverageUnavailable::downsampled;
-    return CoverageUnavailable::none;
+        return CoverageStatus::downsampled;
+    return CoverageStatus::estimating;
 }
 
-// --- Diagnostics -------------------------------------------------------------------
-
-// Events the RT64 side of the estimate reports, each once per run.
-enum class CoverageEvent : unsigned {
-    estimating,
-    no_msaa,
-    scaled_resolution,
-    downsampled,
-    // A framebuffer pair without a depth target and no front surface from
-    // an earlier pair of the same frame: every sample counts as front, so
-    // the coverage comes from the draws' records alone.
-    no_depth,
-    count,
+enum class CoverageLogLevel {
+    debug,
+    warning,
 };
 
-constexpr CoverageEvent coverage_event(CoverageUnavailable reason) {
-    switch (reason) {
-    case CoverageUnavailable::no_msaa:
-        return CoverageEvent::no_msaa;
-    case CoverageUnavailable::scaled_resolution:
-        return CoverageEvent::scaled_resolution;
-    case CoverageUnavailable::downsampled:
-        return CoverageEvent::downsampled;
-    case CoverageUnavailable::none:
-        break;
-    }
-    return CoverageEvent::estimating;
+// A running estimate is routine; every other status is a fallback.
+constexpr CoverageLogLevel coverage_status_log_level(CoverageStatus status) {
+    return (status == CoverageStatus::estimating) ? CoverageLogLevel::debug : CoverageLogLevel::warning;
 }
 
-constexpr const char *coverage_event_message(CoverageEvent event) {
-    switch (event) {
-    case CoverageEvent::estimating:
-        return "coverage estimate running";
-    case CoverageEvent::no_msaa:
-        return "coverage unavailable without MSAA at the RDP's sample positions; "
-               "showing the averaged colour at full coverage";
-    case CoverageEvent::scaled_resolution:
-        return "coverage unavailable at a resolution or aspect scale other than 1; "
-               "showing the averaged colour at full coverage";
-    case CoverageEvent::downsampled:
-        return "coverage unavailable with downsampling; "
-               "showing the averaged colour at full coverage";
-    case CoverageEvent::no_depth:
-        return "framebuffer pair without a depth target; coverage from the draws' "
-               "render modes only";
-    case CoverageEvent::count:
+// The message the RT64 side reports, once per status and run, with the
+// values that decided it.
+inline std::string coverage_status_message(CoverageStatus status, const CoverageTarget &target) {
+    const std::string samples = std::to_string(target.sample_count) + "x MSAA";
+    const std::string fallback = "; showing the averaged colour at full coverage";
+    switch (status) {
+    case CoverageStatus::estimating:
+        return "coverage estimate running (" + samples + " at the RDP's sample positions)";
+    case CoverageStatus::no_msaa:
+        return "coverage unavailable with " + samples +
+               (target.rdp_sample_positions ? "" : " without the RDP's sample positions") +
+               "; it needs 8x or 4x MSAA with sample locations" + fallback;
+    case CoverageStatus::scaled_resolution: {
+        char scale[64];
+        std::snprintf(scale, sizeof(scale), "%.2f x %.2f", double(target.resolution_scale_x),
+                      double(target.resolution_scale_y));
+        return std::string("coverage unavailable at resolution scale ") + scale +
+               "; it needs 1 x 1" + fallback;
+    }
+    case CoverageStatus::downsampled:
+        return "coverage unavailable with downsample multiplier " +
+               std::to_string(target.downsample_multiplier) + "; it needs 1" + fallback;
+    case CoverageStatus::no_depth:
+        return "framebuffer pair without a depth target (" + samples +
+               "); coverage from the draws' render modes only";
+    case CoverageStatus::count:
         break;
     }
     return "";
 }
 
-// Where the RT64 side reports events (debug level). A project sets it before
-// RT64 starts rendering; without one, events are dropped.
-using CoverageLogSink = void (*)(const char *message);
+// Where the RT64 side reports coverage statuses. A project sets it before
+// RT64 starts rendering; without one, they are dropped.
+using CoverageLogSink = void (*)(CoverageLogLevel level, const char *message);
 inline CoverageLogSink &coverage_log_sink() {
     static CoverageLogSink sink = nullptr;
     return sink;
