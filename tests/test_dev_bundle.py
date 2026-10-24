@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 
 from scripts.dev_bundle import (
-    BundleLockedError, BundleSources, FileFacts, bundle_directory_problem, bundle_location, plan_copies,
+    BundleLockedError, BundleSources, FileFacts, FileReplacer, bundle_directory_problem, bundle_location, plan_copies,
     refresh_dev_bundle, vc_runtime_folder,
 )
 from scripts.dev_build import argument_parser
@@ -240,7 +240,7 @@ class RefreshTests(unittest.TestCase):
             os.replace(source, destination)
 
         with self.assertRaises(BundleLockedError) as raised:
-            self.refresh(replace=exe_locked, lock_retry_delays_seconds=(0, 0))
+            self.refresh(replacer=FileReplacer(exe_locked, lock_retry_delays_seconds=(0, 0)))
         self.assertIn("jfg-native-boot.exe", str(raised.exception))
         self.assertIn("close the launcher and game running from", str(raised.exception))
         self.assertEqual((self.bundle / "jfg-package.json").read_bytes(), manifest_before)

@@ -10,7 +10,7 @@ arguments changed, and always cmake --build. All generated files stay local.
 from __future__ import annotations
 
 import argparse
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 import hashlib
@@ -30,9 +30,10 @@ from build_from_rom import NAMES, ROM_SHA1, find_cmake, validate_rom, wsl_path  
 from runtime_identity import write_identity  # noqa: E402
 import dev_bundle  # noqa: E402
 from generated_code_store import (  # noqa: E402
-    KEY_LENGTH, StoreResult, ensure_store_entry, entry_problem, finish_staged_entry, read_json,
+    KEY_LENGTH, StoreOutcome, StoreResult, ensure_store_entry, entry_problem, finish_staged_entry, read_json,
     remove_stale_leftovers, remove_tree, store_entry_path, store_key,
 )
+from local_app_data import jfg_root, local_app_data  # noqa: E402
 from sccache_launcher import (  # noqa: E402
     CompilerCache, choose_launcher, launcher_change, launcher_configure_arguments, sccache_environment,
 )
@@ -48,6 +49,8 @@ MAX_JOBS = 32
 DEFAULT_JOBS = min(os.cpu_count() or 4, MAX_JOBS)  # one per logical core
 DEV_GENERATOR = "Ninja"
 DEV_CACHE_FILE = ROOT / "cmake" / "dev_build.cmake"
+DEFAULT_GENERATION_TIMEOUT_SECONDS = 3600
+MAX_GENERATION_TIMEOUT_SECONDS = 7200
 
 
 def dev_workspace(checkout: Path, cache_base: Path | None = None) -> Path:
@@ -60,10 +63,7 @@ def dev_workspace(checkout: Path, cache_base: Path | None = None) -> Path:
 def generated_code_store_root(jfg_base: Path | None = None) -> Path:
     """Return the generated-code store shared by every checkout: %LOCALAPPDATA%\\JFG\\g."""
     if jfg_base is None:
-        local = os.environ.get("LOCALAPPDATA")
-        if not local:
-            raise ValueError("LOCALAPPDATA is unavailable, so the generated-code store can't be found.")
-        jfg_base = Path(local) / "JFG"
+        jfg_base = jfg_root()
     store = jfg_base.resolve() / GENERATED_CODE_STORE_NAME
     # Generated sources compile straight from the entry, so its path counts toward MSBuild's limit.
     check_binary_path(store_entry_path(store, "0" * KEY_LENGTH) / "normalized")
@@ -352,6 +352,7 @@ class DevState:
         self.data = read_json(self.path) or {}
 
     def update(self, **values: object) -> None:
+        """Merge the given top-level values into the state and write the file."""
         self.data.update(values)
         self.path.write_text(json.dumps(self.data, indent=2) + "\n", encoding="utf-8")
 
@@ -449,11 +450,13 @@ def run_generator(runner: StepRunner, workspace: Path, settings: GenerateSetting
 
 
 STORE_OUTCOME_MESSAGES = {
-    "reused": "generate: skipped (reused store entry {key})",
-    "lost-race": "generate: store entry {key} was published by another run meanwhile; using it",
-    "generated": "generate: published store entry {key}",
-    "replaced": "generate: replaced store entry {key} ({reason})",
+    StoreOutcome.REUSED: "generate: skipped (reused store entry {key})",
+    StoreOutcome.LOST_RACE: "generate: store entry {key} was published by another run meanwhile; using it",
+    StoreOutcome.GENERATED: "generate: published store entry {key}",
+    StoreOutcome.REPLACED: "generate: replaced store entry {key} ({reason})",
 }
+# Outcomes where this run published a new entry, so the build tree must be configured against it.
+REGENERATED_OUTCOMES = frozenset({StoreOutcome.GENERATED, StoreOutcome.REPLACED})
 
 
 def get_store_entry(runner: StepRunner, store: Path, generator_inputs: dict[str, str],
@@ -475,7 +478,7 @@ def get_store_entry(runner: StepRunner, store: Path, generator_inputs: dict[str,
 def play(executable: Path, rom: Path) -> int:
     """Start the runtime exactly as build_from_rom.py --play does."""
     data_root = (Path(os.environ["JFG_DATA_ROOT"]) if os.environ.get("JFG_DATA_ROOT")
-                 else Path(os.environ["LOCALAPPDATA"]) / "JFGRecomp")
+                 else local_app_data() / "JFGRecomp")
     profile = data_root / "profiles/default"
     profile.mkdir(parents=True, exist_ok=True)
     environment = {key: value for key, value in os.environ.items() if not key.startswith("JFG_")}
@@ -485,12 +488,13 @@ def play(executable: Path, rom: Path) -> int:
 
 
 def argument_parser() -> argparse.ArgumentParser:
+    """Return the parser for dev_build.py's command line (range checks are in parse_arguments)."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--rom", required=True, type=Path)
     parser.add_argument("--distro", default="Ubuntu-24.04")
     parser.add_argument("--jobs", type=int, default=DEFAULT_JOBS,
                         help="Parallel compile jobs (default: the number of logical cores)")
-    parser.add_argument("--generation-timeout", type=int, default=3600,
+    parser.add_argument("--generation-timeout", type=int, default=DEFAULT_GENERATION_TIMEOUT_SECONDS,
                         help="Hard limit for the Linux subprocess group, in seconds")
     parser.add_argument("--play", action="store_true", help="Start the runtime after a successful build")
     parser.add_argument("--reconfigure", action="store_true", help="Configure even when nothing requires it")
@@ -511,9 +515,22 @@ def parse_arguments() -> argparse.Namespace:
         parser.error("This build requires Windows x64 and Python 3.11 or newer.")
     if not 1 <= args.jobs <= MAX_JOBS:
         parser.error(f"--jobs must be between 1 and {MAX_JOBS}")
-    if not 1 <= args.generation_timeout <= 7200:
-        parser.error("--generation-timeout must be between 1 and 7200")
+    if not 1 <= args.generation_timeout <= MAX_GENERATION_TIMEOUT_SECONDS:
+        parser.error(f"--generation-timeout must be between 1 and {MAX_GENERATION_TIMEOUT_SECONDS}")
     return args
+
+
+# Steps a run leaves out when nothing requires them; the summary names the ones skipped.
+SKIPPABLE_STEPS = ("generate", "configure")
+
+
+def summary_line(timings: Iterable[Mapping[str, object]], total_seconds: float, *, sccache_used: bool) -> str:
+    """Return the line that ends a run: total time, the steps run and skipped, and whether sccache compiled."""
+    ran = [str(timing["step"]) for timing in timings]
+    skipped = [name for name in SKIPPABLE_STEPS if name not in ran]
+    skipped_text = "; skipped " + ", ".join(skipped) if skipped else ""
+    sccache_text = "; sccache used" if sccache_used else "; sccache not used"
+    return f"Development build done in {total_seconds} s: ran {', '.join(ran)}{skipped_text}{sccache_text}"
 
 
 def main() -> int:
@@ -548,7 +565,7 @@ def main() -> int:
     launcher = choose_launcher(no_sccache=args.no_sccache, found=shutil.which("sccache"))
     logging.log(launcher.level, launcher.message)
     # Set even without a launcher, so nothing ever fills sccache's default cache folder.
-    msvc.update(sccache_environment(Path(os.environ["LOCALAPPDATA"])))
+    msvc.update(sccache_environment(local_app_data()))
     with runner.step("dependencies"):
         prepare_dependencies(runner, dependencies)
     entry = get_store_entry(runner, store, generator_inputs, GenerateSettings(
@@ -559,7 +576,7 @@ def main() -> int:
     arguments = configure_arguments(build, generated_code_location(entry.path), dependencies, tools.ninja,
                                     launcher.launcher)
     plan = plan_build(read_workspace_state(workspace), entry_key, arguments, reconfigure=args.reconfigure,
-                      clean=args.clean, regenerated=entry.outcome in ("generated", "replaced"))
+                      clean=args.clean, regenerated=entry.outcome in REGENERATED_OUTCOMES)
     for reason in plan.reasons:
         print("Reason: " + reason, flush=True)
     if plan.configure:
@@ -591,12 +608,7 @@ def main() -> int:
 
     total_seconds = round(time.monotonic() - started, 1)
     state.update(last_run={"steps": runner.timings, "total_seconds": total_seconds})
-    ran = [timing["step"] for timing in runner.timings]
-    skipped = [name for name in ("generate", "configure") if name not in ran]
-    skipped_text = "; skipped " + ", ".join(skipped) if skipped else ""
-    sccache_text = "; sccache used" if compiler_cache else "; sccache not used"
-    print(f"Development build done in {total_seconds} s: ran {', '.join(ran)}{skipped_text}{sccache_text}",
-          flush=True)
+    print(summary_line(runner.timings, total_seconds, sccache_used=compiler_cache is not None), flush=True)
     print("Built: " + str(executable), flush=True)
     print("Keep this build local. It contains code generated from your ROM.", flush=True)
     if args.play:

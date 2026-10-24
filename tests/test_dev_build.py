@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from scripts.build_paths import MAX_BINARY_ROOT
 from scripts.dev_build import (
@@ -14,7 +16,9 @@ from scripts.dev_build import (
     generator_input_paths,
     native_build_tree,
     plan_build,
+    summary_line,
 )
+from scripts.local_app_data import jfg_root, local_app_data
 
 SHA256_OF_ABC = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
 SHA256_OF_EMPTY = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
@@ -149,6 +153,30 @@ class PlanBuildTests(unittest.TestCase):
         plan = self.plan(built_workspace(), clean=True)
         self.assertTrue(plan.configure)
         self.assertIn("--clean given", plan.reasons)
+
+
+class SummaryLineTests(unittest.TestCase):
+    def test_names_steps_run_and_skipped_and_sccache(self) -> None:
+        timings = [{"step": "dependencies", "seconds": 1.0}, {"step": "build", "seconds": 3.0}]
+        self.assertEqual(summary_line(timings, 4.2, sccache_used=True),
+                         "Development build done in 4.2 s: ran dependencies, build; skipped generate, configure; "
+                         "sccache used")
+
+    def test_leaves_out_skipped_when_every_step_ran(self) -> None:
+        timings = [{"step": name} for name in ("dependencies", "generate", "configure", "build")]
+        self.assertEqual(summary_line(timings, 9.0, sccache_used=False),
+                         "Development build done in 9.0 s: ran dependencies, generate, configure, build; "
+                         "sccache not used")
+
+
+class LocalAppDataTests(unittest.TestCase):
+    def test_jfg_root_is_jfg_under_local_app_data(self) -> None:
+        with mock.patch.dict(os.environ, {"LOCALAPPDATA": "/profile/local"}):
+            self.assertEqual(jfg_root(), Path("/profile/local") / "JFG")
+
+    def test_missing_local_app_data_fails_with_a_readable_error(self) -> None:
+        with mock.patch.dict(os.environ, {"LOCALAPPDATA": ""}), self.assertRaisesRegex(ValueError, "LOCALAPPDATA"):
+            local_app_data()
 
 
 if __name__ == "__main__":

@@ -75,7 +75,7 @@ CACHE_SIZE_BYTES = 20 * 1024 ** 3
 
 
 def sccache_environment(local_app_data: Path) -> dict[str, str]:
-    """Return the variables that put sccache's cache under %LOCALAPPDATA%\JFG with its size cap."""
+    r"""Return the variables that put sccache's cache under %LOCALAPPDATA%\JFG with its size cap."""
     return {"SCCACHE_DIR": str(local_app_data / CACHE_FOLDER), "SCCACHE_CACHE_SIZE": CACHE_SIZE}
 
 
@@ -95,10 +95,10 @@ class CompileStats:
         return self.hits / cacheable if cacheable else None
 
 
-def count(value: object) -> int:
+def stats_count(value: object) -> int:
     """Return a stats count, summing per-language counts ({"counts": {...}}); 0 when absent or unreadable."""
     if isinstance(value, dict):
-        value = sum(count(item) for item in (value.get("counts") or {}).values())
+        value = sum(stats_count(item) for item in (value.get("counts") or {}).values())
     return value if isinstance(value, int) else 0
 
 
@@ -106,10 +106,11 @@ def compile_stats(document: dict) -> CompileStats:
     """Read the compile counts of an `sccache --show-stats --stats-format=json` document."""
     stats = document.get("stats") or {}
     return CompileStats(
-        requests=count(stats.get("compile_requests")),
-        hits=count(stats.get("cache_hits")),
-        misses=count(stats.get("cache_misses")),
-        non_cacheable=count(stats.get("requests_not_cacheable")) + count(stats.get("non_cacheable_compilations")),
+        requests=stats_count(stats.get("compile_requests")),
+        hits=stats_count(stats.get("cache_hits")),
+        misses=stats_count(stats.get("cache_misses")),
+        non_cacheable=(stats_count(stats.get("requests_not_cacheable"))
+                       + stats_count(stats.get("non_cacheable_compilations"))),
     )
 
 
@@ -131,7 +132,12 @@ def describe_build_stats(stats: CompileStats) -> str:
 
 
 def comparable_path(text: str) -> str:
-    # sccache prints the local cache as `Local disk: "D:\\cache"` (Rust debug format, backslashes doubled).
+    r"""Return a path in a form that compares equal however sccache printed it.
+
+    sccache prints the local cache as `Local disk: "D:\\cache"` (Rust debug
+    format, backslashes doubled), so slashes are unified, doubled backslashes
+    collapsed and case folded.
+    """
     return text.replace("/", "\\").replace("\\\\", "\\").lower()
 
 
