@@ -75,26 +75,17 @@ class JobsTests(unittest.TestCase):
     def test_changing_jobs_does_not_reconfigure(self) -> None:
         # Configure arguments don't depend on jobs, so a run with other jobs
         # compares equal to the recorded ones.
-        state = configured_workspace()
-        plan = plan_build(state, dict(INPUTS), ninja_configure_arguments())
+        plan = plan_build(configured_workspace(), KEY, ninja_configure_arguments())
         self.assertFalse(plan.configure)
 
 
-ROM_SHA1 = "493ced9008dbe932d6e91179b68e8630cf23a023"
-GENERATED_FILES = ("normalized/sources.json", "libultra.json", "audio/production-audio-adapter.cpp",
-                   "audio/brokered-rsp.hpp", "audio/brokered-jfg-audio-probe.cpp", "audio/jfg-audio-probe.cpp",
-                   "normalized/jfg_original_timing.h", "normalized/original-timing.json",
-                   "normalized/jfg_original_timing_fast.h", "normalized/funcs.h")
-INPUTS = {"scripts/generate_from_rom.py": "bb"}
+KEY = "71b7842b36c8cf5a"
 
 
 def configured_workspace(**changes: object) -> WorkspaceState:
     """State of a workspace that a Ninja configure and build finished in."""
-    digests = {name: "digest-" + str(index) for index, name in enumerate(GENERATED_FILES)}
     fields: dict[str, object] = {
-        "generation": {"complete": True, "rom_sha1": ROM_SHA1, "files": dict(digests)},
-        "generated_file_digests": dict(digests),
-        "generator_inputs": dict(INPUTS),
+        "store_key": KEY,
         "configure_arguments": ninja_configure_arguments(),
         "configure_succeeded": True,
         "has_cmake_cache": True,
@@ -105,25 +96,24 @@ def configured_workspace(**changes: object) -> WorkspaceState:
 
 
 class GeneratorMismatchTests(unittest.TestCase):
-    def plan(self, state: WorkspaceState):
-        return plan_build(state, dict(INPUTS), ninja_configure_arguments())
+    def plan(self, state: WorkspaceState, **options: bool):
+        return plan_build(state, KEY, ninja_configure_arguments(), **options)
 
     def test_ninja_tree_is_kept(self) -> None:
         plan = self.plan(configured_workspace())
         self.assertFalse(plan.configure)
         self.assertFalse(plan.fresh_build_tree)
 
-    def test_visual_studio_tree_is_configured_fresh_without_regenerating(self) -> None:
+    def test_visual_studio_tree_is_configured_fresh(self) -> None:
         plan = self.plan(configured_workspace(cmake_generator="Visual Studio 17 2022"))
-        self.assertFalse(plan.generate)
         self.assertTrue(plan.configure)
         self.assertTrue(plan.fresh_build_tree)
         self.assertIn("build tree was configured with Visual Studio 17 2022, not Ninja: starting it fresh",
                       plan.reasons)
 
-    def test_visual_studio_tree_is_also_started_fresh_when_regenerating(self) -> None:
-        plan = self.plan(configured_workspace(cmake_generator="Visual Studio 17 2022", generator_inputs={}))
-        self.assertTrue(plan.generate)
+    def test_visual_studio_tree_is_also_started_fresh_after_a_regeneration(self) -> None:
+        plan = self.plan(configured_workspace(cmake_generator="Visual Studio 17 2022"), regenerated=True)
+        self.assertTrue(plan.configure)
         self.assertTrue(plan.fresh_build_tree)
 
     def test_reads_the_generator_from_the_cmake_cache(self) -> None:
