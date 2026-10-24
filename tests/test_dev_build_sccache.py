@@ -16,6 +16,7 @@ NINJA = Path("/vs/ninja.exe")
 GENERATED = GeneratedCode(normalized=Path("/g/k/normalized"), libultra=Path("/g/k/libultra.json"),
                           audio=Path("/g/k/audio"))
 KEY = "71b7842b36c8cf5a"
+LOCAL_APP_DATA = Path("D:/Profile/AppData/Local")
 
 
 def arguments_with(launcher: Path | None) -> list[str]:
@@ -82,9 +83,9 @@ class LauncherReconfigureTests(unittest.TestCase):
 
 class EnvironmentTests(unittest.TestCase):
     def test_cache_lives_under_jfg_with_a_20_gib_cap(self) -> None:
-        environment = sccache_environment(Path("C:/Users/dev/AppData/Local"))
+        environment = sccache_environment(LOCAL_APP_DATA)
         self.assertEqual(environment, {
-            "SCCACHE_DIR": str(Path("C:/Users/dev/AppData/Local/JFG/cache/sccache")),
+            "SCCACHE_DIR": str(Path("D:/Profile/AppData/Local/JFG/cache/sccache")),
             "SCCACHE_CACHE_SIZE": "20G",
         })
 
@@ -99,7 +100,8 @@ def stats_document(requests: int, hits: int, misses: int, not_cacheable: int, no
             "cache_hits": {"counts": {"C/C++": hits}, "adv_counts": {"msvc": hits}},
             "cache_misses": {"counts": {"C/C++": misses}, "adv_counts": {"msvc": misses}},
         },
-        "cache_location": "Local disk: \"C:\\Users\\dev\\AppData\\Local\\JFG\\cache\\sccache\"",
+        # Rust debug format: sccache doubles each backslash.
+        "cache_location": r'Local disk: "D:\\Profile\\AppData\\Local\\JFG\\cache\\sccache"',
         "max_cache_size": 21474836480,
     }
 
@@ -140,7 +142,7 @@ class BuildStatsLineTests(unittest.TestCase):
 
 
 class ServerSettingsTests(unittest.TestCase):
-    ENVIRONMENT = sccache_environment(Path("C:/Users/dev/AppData/Local"))
+    ENVIRONMENT = sccache_environment(LOCAL_APP_DATA)
 
     def test_server_with_our_cache_and_cap_is_fine(self) -> None:
         document = stats_document(requests=0, hits=0, misses=0, not_cacheable=0, non_cacheable=0)
@@ -148,7 +150,7 @@ class ServerSettingsTests(unittest.TestCase):
 
     def test_server_with_the_default_cache_folder_is_reported(self) -> None:
         document = stats_document(requests=0, hits=0, misses=0, not_cacheable=0, non_cacheable=0)
-        document["cache_location"] = 'Local disk: "C:\\Users\\dev\\AppData\\Local\\Mozilla\\sccache\\cache"'
+        document["cache_location"] = r'Local disk: "D:\\Profile\\AppData\\Local\\Mozilla\\sccache\\cache"'
         problem = server_settings_problem(document, self.ENVIRONMENT)
         self.assertIn("Mozilla", problem)
         self.assertIn("sccache --stop-server", problem)

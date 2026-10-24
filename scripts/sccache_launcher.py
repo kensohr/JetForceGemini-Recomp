@@ -131,7 +131,7 @@ def describe_build_stats(stats: CompileStats) -> str:
 
 
 def comparable_path(text: str) -> str:
-    # sccache prints the local cache as `Local disk: "C:\Users\..."` (Rust debug format, backslashes doubled).
+    # sccache prints the local cache as `Local disk: "D:\\cache"` (Rust debug format, backslashes doubled).
     return text.replace("/", "\\").replace("\\\\", "\\").lower()
 
 
