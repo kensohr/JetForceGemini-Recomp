@@ -35,7 +35,10 @@ NATIVE_BUILD_NAME = "n"
 LOG_FOLDER_NAME = "logs"
 STATE_FILE_NAME = "dev-build.json"
 BUILD_TARGET = "jfg-native-boot"
-DEFAULT_JOBS = min(os.cpu_count() or 4, 8)  # build_from_rom.py's default
+MAX_JOBS = 32
+DEFAULT_JOBS = min(os.cpu_count() or 4, MAX_JOBS)  # one per logical core
+DEV_GENERATOR = "Ninja"
+DEV_CACHE_FILE = ROOT / "cmake" / "dev_build.cmake"
 
 
 def dev_workspace(checkout: Path, cache_base: Path | None = None) -> Path:
@@ -133,6 +136,8 @@ class WorkspaceState:
     configure_arguments: list[str] | None = None
     configure_succeeded: bool = False
     has_cmake_cache: bool = False
+    # The generator named in the CMake cache, or None when unknown.
+    cmake_generator: str | None = None
 
 
 @dataclass(frozen=True)
@@ -143,6 +148,8 @@ class BuildPlan:
     configure: bool
     reasons: tuple[str, ...]
     build: bool = True
+    # Delete the build tree before configuring: CMake can't switch generators in place.
+    fresh_build_tree: bool = False
 
 
 def generation_problem(state: WorkspaceState) -> str | None:
@@ -174,8 +181,18 @@ def generator_inputs_problem(state: WorkspaceState, generator_inputs: Mapping[st
     return None
 
 
+def generator_mismatch(state: WorkspaceState) -> str | None:
+    """Return why the build tree must start fresh because another generator configured it."""
+    if not state.has_cmake_cache or state.cmake_generator in (None, DEV_GENERATOR):
+        return None
+    return f"build tree was configured with {state.cmake_generator}, not {DEV_GENERATOR}: starting it fresh"
+
+
 def configure_problem(state: WorkspaceState, configure_arguments: list[str]) -> str | None:
     """Return why the build tree must be configured, or None when cmake --build suffices."""
+    mismatch = generator_mismatch(state)
+    if mismatch:
+        return mismatch
     if not state.has_cmake_cache:
         return "no CMake cache"
     if not state.configure_succeeded:
@@ -190,13 +207,20 @@ def plan_build(state: WorkspaceState, generator_inputs: Mapping[str, str], confi
     """Decide whether a run generates and configures before it builds."""
     if clean:
         return BuildPlan(generate=True, configure=True, reasons=("--clean given",))
+    mismatch = generator_mismatch(state)
+    mismatch_reasons = (mismatch,) if mismatch else ()
     generate_reason = generation_problem(state) or generator_inputs_problem(state, generator_inputs)
     if generate_reason:
         return BuildPlan(generate=True, configure=True,
-                         reasons=(generate_reason, "configure follows a regeneration"))
-    configure_reason = "--reconfigure given" if reconfigure else configure_problem(state, configure_arguments)
+                         reasons=(generate_reason, "configure follows a regeneration", *mismatch_reasons),
+                         fresh_build_tree=bool(mismatch))
+    if reconfigure:
+        return BuildPlan(generate=False, configure=True, reasons=("--reconfigure given", *mismatch_reasons),
+                         fresh_build_tree=bool(mismatch))
+    configure_reason = configure_problem(state, configure_arguments)
     if configure_reason:
-        return BuildPlan(generate=False, configure=True, reasons=(configure_reason,))
+        return BuildPlan(generate=False, configure=True, reasons=(configure_reason,),
+                         fresh_build_tree=bool(mismatch))
     return BuildPlan(generate=False, configure=False, reasons=())
 
 
@@ -222,16 +246,18 @@ def generated_code_configure_arguments(generated: GeneratedCode) -> list[str]:
             "-DJFG_PHASE8_PRIVATE_AUDIO_ADAPTER_ROOT=" + str(generated.audio)]
 
 
-def configure_arguments(build: Path, generated: GeneratedCode, dependencies: Path, jobs: int) -> list[str]:
+def configure_arguments(build: Path, generated: GeneratedCode, dependencies: Path, ninja: Path) -> list[str]:
     """Return the cmake configure arguments (without the cmake executable).
 
-    These must match build_from_rom.py's configure step, so a development
-    build compiles the same runtime as a from-ROM build.
+    The -D definitions must match build_from_rom.py's configure step, so a
+    development build compiles the same runtime as a from-ROM build. Two are
+    left out: JFG_SUPPORT_SYMBOLS (cmake/dev_build.cmake switches it off for
+    /Z7 and links with /DEBUG itself) and JFG_MSVC_GENERATED_COMPILE_JOBS
+    (MSBuild-only; Ninja parallelises across files).
     """
-    return ["-S", str(ROOT), "-B", str(build),
-            "-G", "Visual Studio 17 2022", "-A", "x64", "-DBUILD_TESTING=OFF", "-DJFG_SUPPORT_SYMBOLS=ON",
-            "-DJFG_MSVC_GENERATED_COMPILE_JOBS=" + str(jobs),
-            "-DJFG_ENABLE_GENERATED_CODE=ON", "-DJFG_BUILD_PHASE6_NATIVE_BOOT=ON",
+    return ["-S", str(ROOT), "-B", str(build), "-C", str(DEV_CACHE_FILE),
+            "-G", DEV_GENERATOR, "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_MAKE_PROGRAM=" + str(ninja),
+            "-DBUILD_TESTING=OFF", "-DJFG_ENABLE_GENERATED_CODE=ON", "-DJFG_BUILD_PHASE6_NATIVE_BOOT=ON",
             "-DJFG_BUILD_PHASE8_LIVE=ON", "-DJFG_ENABLE_RT64=ON",
             *generated_code_configure_arguments(generated),
             "-DJFG_PHASE8_PRIVATE_AUDIO_RUNTIME_INCLUDE=" + str(dependencies / "N64ModernRuntime/librecomp/include"),
@@ -239,8 +265,88 @@ def configure_arguments(build: Path, generated: GeneratedCode, dependencies: Pat
 
 
 def runtime_executable(build: Path) -> Path:
-    """Return the runtime executable that building the build tree produces."""
-    return build / "Release" / (BUILD_TARGET + ".exe")
+    """Return the runtime executable that building the build tree produces.
+
+    Ninja is single-config, so the exe lands in the build tree root, not in
+    Release as with the Visual Studio generator.
+    """
+    return build / (BUILD_TARGET + ".exe")
+
+
+def build_command(cmake: str, build: Path, jobs: int) -> list[str]:
+    """Return the cmake --build command; the job count is passed only here."""
+    return [cmake, "--build", str(build), "--target", BUILD_TARGET, "--parallel", str(jobs)]
+
+
+CMAKE_CACHE_GENERATOR = re.compile(r"^CMAKE_GENERATOR:INTERNAL=(.*)$", re.M)
+
+
+def cache_generator(cmake_cache: str) -> str | None:
+    """Return the generator a CMakeCache.txt names, or None when it names none."""
+    match = CMAKE_CACHE_GENERATOR.search(cmake_cache)
+    return match.group(1).strip() if match else None
+
+
+@dataclass(frozen=True)
+class VisualStudioTools:
+    """The MSVC environment script and Ninja of a Visual Studio 2022 install."""
+
+    vcvars: Path
+    ninja: Path
+
+
+VCVARS_PATH = "VC/Auxiliary/Build/vcvars64.bat"
+NINJA_PATH = "Common7/IDE/CommonExtensions/Microsoft/CMake/Ninja/ninja.exe"
+
+
+def visual_studio_tools(install: Path) -> VisualStudioTools:
+    """Return vcvars64.bat and the bundled ninja.exe of an install; fail naming a missing one."""
+    tools = VisualStudioTools(vcvars=install / VCVARS_PATH, ninja=install / NINJA_PATH)
+    for tool in (tools.vcvars, tools.ninja):
+        if not tool.is_file():
+            raise ValueError(f"Required tool missing: {tool}. Install the Visual Studio 2022 C++ desktop "
+                             "tools with CMake support.")
+    return tools
+
+
+# Printed between vcvars64.bat's banner and the `set` listing of the environment it leaves.
+ENVIRONMENT_MARKER = "===ENVIRONMENT==="
+
+
+def parse_environment_listing(listing: str) -> dict[str, str]:
+    """Return the variables of a `set` listing that follows ENVIRONMENT_MARKER."""
+    _, marker, variables = listing.partition(ENVIRONMENT_MARKER)
+    if not marker:
+        raise ValueError("vcvars64.bat did not finish; the MSVC environment is unknown.")
+    environment = {}
+    for line in variables.splitlines():
+        name, separator, value = line.partition("=")
+        # cmd keeps per-drive working folders as hidden "=C:" variables; skip them.
+        if separator and name:
+            environment[name] = value
+    return environment
+
+
+def find_visual_studio() -> Path:
+    """Return the VS 2022 install with C++ tools that vswhere reports, as find_cmake searches it."""
+    base = Path(os.environ.get("ProgramFiles(x86)", "C:/Program Files (x86)"))
+    vswhere = base / "Microsoft Visual Studio/Installer/vswhere.exe"
+    if not vswhere.is_file():
+        raise ValueError(f"Required tool missing: {vswhere}")
+    found = subprocess.check_output([str(vswhere), "-latest", "-products", "*",
+                                     "-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+                                     "-property", "installationPath"], text=True).strip().splitlines()
+    if not found:
+        raise ValueError("Install Visual Studio 2022 C++ desktop tools with CMake support.")
+    return Path(found[0])
+
+
+def msvc_environment(vcvars: Path) -> dict[str, str]:
+    """Run vcvars64.bat and return the x64 MSVC environment it leaves."""
+    # cmd /s strips the outer quotes and keeps the quoted path with spaces intact.
+    command = f'cmd /d /s /c ""{vcvars}" >nul && echo {ENVIRONMENT_MARKER} && set"'
+    listing = subprocess.run(command, capture_output=True, text=True, errors="replace", check=False).stdout
+    return parse_environment_listing(listing)
 
 
 def file_sha256(path: Path) -> str | None:
@@ -271,13 +377,17 @@ def read_workspace_state(workspace: Path) -> WorkspaceState:
             digests[name] = file_sha256(workspace / name)
     dev_state = read_json(workspace / STATE_FILE_NAME) or {}
     configure = dev_state.get("configure") or {}
+    cmake_cache = native_build_tree(workspace) / "CMakeCache.txt"
+    has_cmake_cache = cmake_cache.is_file()
     return WorkspaceState(
         generation=generation,
         generated_file_digests=digests,
         generator_inputs=dev_state.get("generator_inputs"),
         configure_arguments=configure.get("arguments"),
         configure_succeeded=configure.get("succeeded") is True,
-        has_cmake_cache=(native_build_tree(workspace) / "CMakeCache.txt").is_file(),
+        has_cmake_cache=has_cmake_cache,
+        cmake_generator=(cache_generator(cmake_cache.read_text(encoding="utf-8", errors="replace"))
+                         if has_cmake_cache else None),
     )
 
 
@@ -364,13 +474,13 @@ class StepRunner:
             self.timings.append({"step": name, "seconds": seconds, "succeeded": succeeded})
             print(f"{name}: {'done' if succeeded else 'failed'} in {seconds} s", flush=True)
 
-    def run(self, name: str, command: list[str], cwd: Path = ROOT) -> None:
+    def run(self, name: str, command: list[str], cwd: Path = ROOT, env: Mapping[str, str] | None = None) -> None:
         """Run a command with its output in the log; raise naming the log on failure."""
         self.logs.mkdir(parents=True, exist_ok=True)
         log = self.logs / (name + ".log")
         with log.open("w", encoding="utf-8", buffering=1) as stream:
             with subprocess.Popen(command, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                  text=True, errors="replace") as process:
+                                  text=True, errors="replace", env=env) as process:
                 for line in process.stdout:
                     stream.write(line)
                     is_progress = name == "generate" and GENERATOR_STAGE.fullmatch(line)
@@ -436,21 +546,27 @@ def play(executable: Path, rom: Path) -> int:
                            cwd=executable.parent, env=environment)
 
 
-def parse_arguments() -> argparse.Namespace:
+def argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--rom", required=True, type=Path)
     parser.add_argument("--distro", default="Ubuntu-24.04")
-    parser.add_argument("--jobs", type=int, default=DEFAULT_JOBS)
+    parser.add_argument("--jobs", type=int, default=DEFAULT_JOBS,
+                        help="Parallel compile jobs (default: the number of logical cores)")
     parser.add_argument("--generation-timeout", type=int, default=3600,
                         help="Hard limit for the Linux subprocess group, in seconds")
     parser.add_argument("--play", action="store_true", help="Start the runtime after a successful build")
     parser.add_argument("--reconfigure", action="store_true", help="Configure even when nothing requires it")
     parser.add_argument("--clean", action="store_true", help="Delete the development workspace and start over")
+    return parser
+
+
+def parse_arguments() -> argparse.Namespace:
+    parser = argument_parser()
     args = parser.parse_args()
     if os.name != "nt" or sys.version_info < (3, 11):
         parser.error("This build requires Windows x64 and Python 3.11 or newer.")
-    if not 1 <= args.jobs <= 32:
-        parser.error("--jobs must be between 1 and 32")
+    if not 1 <= args.jobs <= MAX_JOBS:
+        parser.error(f"--jobs must be between 1 and {MAX_JOBS}")
     if not 1 <= args.generation_timeout <= 7200:
         parser.error("--generation-timeout must be between 1 and 7200")
     return args
@@ -462,6 +578,7 @@ def main() -> int:
     rom = args.rom.resolve()
     validate_rom(rom)  # Reject before downloads or build output.
     cmake = find_cmake()
+    tools = visual_studio_tools(find_visual_studio())
     for tool in ("git", "wsl"):
         if not shutil.which(tool):
             raise ValueError(f"Required tool missing: {tool}")
@@ -477,7 +594,7 @@ def main() -> int:
 
     generator_inputs = generator_input_fingerprint(ROOT, generator_input_paths(ROOT))
     generated = generated_code_location(workspace)
-    arguments = configure_arguments(build, generated, dependencies, args.jobs)
+    arguments = configure_arguments(build, generated, dependencies, tools.ninja)
     plan = plan_build(read_workspace_state(workspace), generator_inputs, arguments,
                       reconfigure=args.reconfigure, clean=args.clean)
     for reason in plan.reasons:
@@ -485,6 +602,8 @@ def main() -> int:
 
     runner = StepRunner(workspace)
     state = DevState(workspace)
+    # Ninja, unlike MSBuild, needs cl and link on PATH; captured once per run.
+    msvc = msvc_environment(tools.vcvars)
     with runner.step("dependencies"):
         prepare_dependencies(runner, dependencies)
     if plan.generate:
@@ -498,14 +617,16 @@ def main() -> int:
         print("generate: skipped (generated code matches the ROM and generator inputs)", flush=True)
     if plan.configure:
         state.update(configure={"arguments": arguments, "succeeded": False})
+        if plan.fresh_build_tree:
+            print("configure: deleting the build tree " + str(build), flush=True)
+            remove_tree(build)
         with runner.step("configure"):
-            runner.run("configure", [cmake, *arguments])
+            runner.run("configure", [cmake, *arguments], env=msvc)
         state.update(configure={"arguments": arguments, "succeeded": True})
     else:
         print("configure: skipped (configure arguments unchanged)", flush=True)
     with runner.step("build"):
-        runner.run("build", [cmake, "--build", str(build), "--config", "Release",
-                   "--target", BUILD_TARGET, "--parallel", str(args.jobs)])
+        runner.run("build", build_command(cmake, build, args.jobs), env=msvc)
     executable = runtime_executable(build)
     if not executable.is_file():
         raise RuntimeError("Build finished without the native executable.")
