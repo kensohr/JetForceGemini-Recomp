@@ -28,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from build_paths import check_binary_path, windows_cache  # noqa: E402
 from build_from_rom import NAMES, ROM_SHA1, find_cmake, validate_rom, wsl_path  # noqa: E402
 from runtime_identity import write_identity  # noqa: E402
+import dev_bundle  # noqa: E402
 from generated_code_store import (  # noqa: E402
     KEY_LENGTH, StoreResult, ensure_store_entry, entry_problem, finish_staged_entry, read_json,
     remove_stale_leftovers, remove_tree, store_entry_path, store_key,
@@ -499,6 +500,7 @@ def argument_parser() -> argparse.ArgumentParser:
                         help="Move the generated-code store entry aside and generate it again")
     parser.add_argument("--no-sccache", action="store_true",
                         help="Compile without sccache even when it is installed (e.g. for baseline timings)")
+    dev_bundle.add_bundle_arguments(parser)
     return parser
 
 
@@ -520,6 +522,7 @@ def main() -> int:
     started = time.monotonic()
     rom = args.rom.resolve()
     validate_rom(rom)  # Reject before downloads or build output.
+    dev_bundle.check_bundle_arguments(args)
     cmake = find_cmake()
     tools = visual_studio_tools(find_visual_studio())
     for tool in ("git", "wsl"):
@@ -582,6 +585,9 @@ def main() -> int:
     if not executable.is_file():
         raise RuntimeError("Build finished without the native executable.")
     write_identity(executable, ROOT)
+    if args.bundle:
+        with runner.step("bundle"):
+            dev_bundle.refresh_after_build(args, executable, ROOT, find_visual_studio)
 
     total_seconds = round(time.monotonic() - started, 1)
     state.update(last_run={"steps": runner.timings, "total_seconds": total_seconds})
