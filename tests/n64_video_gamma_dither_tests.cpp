@@ -90,15 +90,23 @@ int main() {
         "the noise is a function of position and frame");
 
   // Gamma with gamma dither is warned about once per run, naming VI_CONTROL;
-  // the supported cases aren't reported.
+  // the supported cases aren't reported. The caller passes the setting
+  // vi_filtering decided, plus VI_CONTROL for the message.
+  auto report = [&](std::uint32_t control) {
+    n64_video::report_gamma_dither(filtering(control).gamma_dither, control);
+  };
+  // Reported before a project sets the sink: dropped, but the once-per-run
+  // warning stays available for when the sink is set.
+  n64_video::gamma_dither_log_sink() = nullptr;
+  report(0x1301EU);
   static std::vector<std::string> warnings;
   n64_video::gamma_dither_log_sink() = [](const char *message) { warnings.emplace_back(message); };
-  n64_video::report_gamma_dither(0x13016U);
-  n64_video::report_gamma_dither(0x13012U);
+  report(0x13016U);
+  report(0x13012U);
   check(warnings.empty(), "supported gamma-dither settings aren't reported");
-  n64_video::report_gamma_dither(0x1301EU);
-  n64_video::report_gamma_dither(0x1301EU);
-  n64_video::report_gamma_dither(0x1311EU);
+  report(0x1301EU);
+  report(0x1301EU);
+  report(0x1311EU);
   check(warnings.size() == 1, "gamma with gamma dither is reported once per run");
   check(!warnings.empty() && warnings.front().find("0x1301E") != std::string::npos,
         "the warning names the VI_CONTROL value");

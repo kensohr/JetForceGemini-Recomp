@@ -303,8 +303,11 @@ build_compute_shader(rt64 "src/shaders/CoverageEstimateCS.hlsl")]==])
             std::unique_ptr<RenderFramebuffer> framebuffer;
             uint32_t width = 0;
             uint32_t height = 0;
-            // Advances once per presented frame, interpolated frames
-            // included, so the gamma-dither noise changes every frame.
+            // Advances each time renderPrepass draws. RT64's present queue
+            // calls render() once per frame it presents, interpolated frames
+            // included, so while the pre-pass runs the gamma-dither noise
+            // changes every presented frame; frames it skips (VI filtering
+            // off, nothing shown) don't advance it.
             uint32_t frameCounter = 0;
         };
         Prepass prepass;]==])
@@ -406,7 +409,7 @@ build_compute_shader(rt64 "src/shaders/CoverageEstimateCS.hlsl")]==])
         pushConstants.coverageInput = (p.coverageTexture != nullptr) ? 1 : 0;
         pushConstants.viAntiAliasing = filtering.anti_aliasing ? 1 : 0;
         pushConstants.divot = filtering.divot ? 1 : 0;
-        n64_video::report_gamma_dither(viControl);
+        n64_video::report_gamma_dither(filtering.gamma_dither, viControl);
         pushConstants.gammaDither = (filtering.gamma_dither == n64_video::GammaDither::noise) ? 1 : 0;
         pushConstants.noiseFrame = prepass.frameCounter++;
 

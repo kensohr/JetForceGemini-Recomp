@@ -14,11 +14,11 @@
 // vi_process_full) and parallel-RDP (vi_scale.frag).
 namespace n64_video {
 
-inline constexpr int channel_max = 255;
+inline constexpr int gamma_dither_channel_max = 255;
 
 // One channel plus its noise bit (0 or 1), saturating at 255.
 constexpr int gamma_dither_channel(int value, std::uint32_t noise_bit) {
-    return std::min(value + int(noise_bit), channel_max);
+    return std::min(value + int(noise_bit), gamma_dither_channel_max);
 }
 
 // Chris Wellons' lowbias32 integer hash: every input bit changes about half
@@ -62,16 +62,19 @@ inline std::string gamma_dither_message(std::uint32_t vi_control) {
 }
 
 // Warns once per run when VI_CONTROL asks for gamma dither with gamma; every
-// other setting is shown as asked, so it isn't reported.
-inline void report_gamma_dither(std::uint32_t vi_control) {
-    if (gamma_dither(vi_control) != GammaDither::unsupported_with_gamma)
+// other setting is shown as asked, so it isn't reported. `setting` is what
+// vi_filtering decided from `vi_control`, which only goes into the message.
+// While no sink is set, a report is dropped without using up the warning.
+inline void report_gamma_dither(GammaDither setting, std::uint32_t vi_control) {
+    if (setting != GammaDither::unsupported_with_gamma)
+        return;
+    const GammaDitherLogSink sink = gamma_dither_log_sink();
+    if (sink == nullptr)
         return;
     static std::atomic<bool> reported{false};
     if (reported.exchange(true))
         return;
-    const GammaDitherLogSink sink = gamma_dither_log_sink();
-    if (sink != nullptr)
-        sink(gamma_dither_message(vi_control).c_str());
+    sink(gamma_dither_message(vi_control).c_str());
 }
 
 } // namespace n64_video
