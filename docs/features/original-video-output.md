@@ -62,7 +62,10 @@ The game log says `VI anti-aliasing and divot filter from estimated coverage;
 MSAA resolves take RT64's raster path`, then the MSAA count in use
 (`Original video output: MSAA 8x in use`, or a warning on a fallback), and at
 debug level `coverage estimate running (8x MSAA at the RDP's sample
-positions)` once the first frame is estimated.
+positions)` once the first frame is estimated. Jet Force Gemini also writes
+every `Original video output: ...` line to `video.log` next to the support
+log that `JFG_SUPPORT_LOG` names (the launch's folder under the launcher), so
+they can be read while the game runs.
 
 - **Sample positions.** RT64 renders with 8x MSAA at the RDP's 8 sample
   positions (4 sub-scanlines, x 0 and 4/8 on rows 0 and 2, 2/8 and 6/8 on
