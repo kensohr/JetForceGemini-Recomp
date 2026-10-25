@@ -37,11 +37,18 @@ anti-aliasing and filters, and its scanline resampling.
 - **Status:** playable.
 - **More:** [docs/features/original-video-output.md](docs/features/original-video-output.md)
 
-## In progress
+### CRT filter
 
-- **CRT filter**: an optional CRT look on top of Original video output, with
-  presets for a composite TV, an S-Video TV and an RGB monitor, and optional
-  screen curvature.
+An optional CRT look on top of Original video output: scanlines, a phosphor
+mask and the blur and colour bleed of the cable, with presets for the displays
+players used. Optional screen curvature bends the picture like a CRT tube.
+
+- **Turn it on:** launcher › Video settings › Display › **CRT filter:
+  Composite TV / S-Video TV / RGB monitor**, and optionally **Screen
+  curvature**. Needs Video output: Original. **Off** is the default, and
+  curvature is off by default. Applies on the next game launch.
+- **Status:** built, not yet play-tested.
+- **More:** [docs/features/original-video-output.md#crt-filter](docs/features/original-video-output.md#crt-filter)
 
 ## For developers
 
@@ -56,6 +63,7 @@ all; `main` mirrors the original project's `main`.
 | --- | --- | --- |
 | Camera-relative running | `modern-camera-relative-running` | not offered |
 | Original video output | `original-video-output` | not offered |
+| CRT filter | `crt-filter` (cut from `original-video-output`) | not offered: an enhancement, so `kensohr` only |
 | Optimised from-ROM builds | `release-optimised-rom-build` | not offered |
 | Fast development builds | `fast-development-builds` | not offered |
 
