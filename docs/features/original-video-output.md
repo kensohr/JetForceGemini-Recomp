@@ -125,6 +125,42 @@ they can be read while the game runs.
   softened by the average, and without MSAA they stay hard. See Known
   approximations.
 
+## CRT filter
+
+**CRT filter: Off / Composite TV / S-Video TV / RGB monitor** and **Screen
+curvature**, on the same Display tab, simulate the display the console was
+connected to, on top of Original. The CRT filter is only enabled while Video
+output is Original, and Screen curvature only while a CRT filter is
+selected. Both are off by default and saved in `video.ini` (`crt_filter`,
+`crt_curvature`).
+
+- With a CRT preset, the VI pass's final draw runs the CRT filter on the
+  pre-pass's native-resolution output, in place of RT64's pixel-scaling
+  filter, and fills the same picture rectangle.
+- Colour order:
+  1. VI gamma.
+  2. The connection's luma and chroma blur (YIQ, in gamma space).
+  3. A decode to linear light with a CRT gamma of 2.4.
+  4. Scanlines (one per framebuffer row, one per row pair above 288 rows)
+     and the phosphor mask.
+  5. An sRGB encode.
+- Presets:
+  - *RGB monitor*: crisp, pronounced scanlines, an aperture grille.
+  - *S-Video TV*: slight luma and moderate chroma blur, faint scanlines, a
+    slot mask.
+  - *Composite TV*: as S-Video, with wider blur and a small chroma shift,
+    which gives colour bleed.
+- Screen curvature bends the picture per preset, with a vignette and rounded
+  corners; the mask stays on whole output pixels.
+- Interpolated frames are filtered. The frame diagnostics overlay is not.
+  Screenshots capture the filtered image.
+- The shaders are this project's own HLSL after Timothy Lottes'
+  public-domain CRT approach, with no GPL code.
+
+The CRT filter is part of the video core, so other RT64-based recomps can
+reuse it together with Original video output. See the
+[video core integration guide](../../src/renderer/n64_video/INTEGRATION.md).
+
 ## Known approximations
 
 - **Dithering happens once per presented frame.** The console dithers on
@@ -187,7 +223,11 @@ they can be read while the game runs.
 
 The emulation lives in the video core, `src/renderer/n64_video/`, which has no
 game-specific code and is configured only through `n64_video::VideoOptions`
-and the VI registers. Its decisions and reference arithmetic are in the core
+and the VI registers. Its
+[integration guide](../../src/renderer/n64_video/INTEGRATION.md) tells another
+project how to adopt it: what it emulates, how to apply its RT64 patch
+(`rt64_n64_video.patch`, generated from the CMake script below), the options
+and the glue left to the project. Its decisions and reference arithmetic are in the core
 (`colour_reduction.hpp`, `vi_filtering.hpp`, `coverage_estimate.hpp`,
 `vi_anti_aliasing.hpp`, `gamma_dither.hpp`).
 

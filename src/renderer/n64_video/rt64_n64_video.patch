@@ -1,0 +1,1836 @@
+Video core RT64 patch (src/renderer/n64_video/), against RT64 5473732a822a4423b5696e7cb18fecc425a59875.
+Generated from cmake/rt64_n64_video.cmake by scripts/export_n64_video_rt64_patch.py; don't edit it by hand.
+Apply it in the RT64 checkout with: git apply rt64_n64_video.patch
+See INTEGRATION.md in this folder.
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index cc140e0881a1a71bbb3cb02a01acc91577dc1842..3115c0c1416108dbebd1212f1bd7515dbeff24c5 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -518,6 +518,7 @@ build_compute_shader(rt64 "src/shaders/FbWriteDepthCS.hlsl")
+ build_compute_shader(rt64 "src/shaders/FbWriteDepthCS.hlsl" "src/shaders/FbWriteDepthCSMS.hlsl" "-D MULTISAMPLING")
+ build_compute_shader(rt64 "src/shaders/GaussianFilterRGB3x3CS.hlsl")
+ build_compute_shader(rt64 "src/shaders/BoxFilterCS.hlsl")
++build_compute_shader(rt64 "src/shaders/CoverageEstimateCS.hlsl")
+ build_compute_shader(rt64 "src/shaders/BicubicScalingCS.hlsl")
+ build_compute_shader(rt64 "src/shaders/HistogramAverageCS.hlsl")
+ build_compute_shader(rt64 "src/shaders/HistogramClearCS.hlsl")
+@@ -548,6 +549,8 @@ build_pixel_shader(  rt64 "src/shaders/TextureResolvePS.hlsl" "src/shaders/Textu
+ build_pixel_shader(  rt64 "src/shaders/TextureResolvePS.hlsl" "src/shaders/TextureResolveSamples8XPS.hlsl" "-D SAMPLES_8X")
+ build_pixel_shader(  rt64 "src/shaders/VideoInterfacePS.hlsl" "src/shaders/VideoInterfacePSRegular.hlsl")
+ build_pixel_shader(  rt64 "src/shaders/VideoInterfacePS.hlsl" "src/shaders/VideoInterfacePSPixel.hlsl" "-D PIXEL_ANTIALIASING")
++build_pixel_shader(  rt64 "src/shaders/VideoInterfacePS.hlsl" "src/shaders/VideoInterfacePSPrepass.hlsl" "-D VI_PREPASS")
++build_pixel_shader(  rt64 "src/shaders/VideoInterfacePS.hlsl" "src/shaders/VideoInterfacePSCrt.hlsl" "-D VI_CRT")
+ build_vertex_shader( rt64 "src/shaders/FullScreenVS.hlsl")
+ build_vertex_shader( rt64 "src/shaders/Im3DVS.hlsl")
+ build_pixel_shader(  rt64 "src/shaders/ComposePS.hlsl")
+diff --git a/src/hle/rt64_present_queue.cpp b/src/hle/rt64_present_queue.cpp
+index b685732b1ded4693394c1af324ba00b6b397ee40..4e6d22da7908e9b1d7a1fcea017b6f8f27e3b284 100644
+--- a/src/hle/rt64_present_queue.cpp
++++ b/src/hle/rt64_present_queue.cpp
+@@ -323,6 +323,7 @@ namespace RT64 {
+                     renderParams.filtering = filtering;
+                     renderParams.vi = &present.screenVI;
+                     renderParams.removeBlackBorders = removeBlackBorders;
++                    renderParams.framebuffer = swapChainFramebuffer;
+ 
+                     const bool useDownsampling = (colorTarget->downsampleMultiplier > 1);
+                     if (useDownsampling) {
+@@ -337,6 +338,7 @@ namespace RT64 {
+                         renderParams.texture = colorTarget->getResolvedTexture();
+                         renderParams.textureWidth = colorTarget->width;
+                         renderParams.textureHeight = colorTarget->height;
++                        renderParams.coverageTexture = coverageEstimateTexture(colorTarget);
+                     }
+                 }
+                 
+diff --git a/src/hle/rt64_workload_queue.cpp b/src/hle/rt64_workload_queue.cpp
+index c20a1887ed713f447e350d474ce0b16b0e487464..1b663df1f906b256ec2ec25696eef5ac39bf8718 100644
+--- a/src/hle/rt64_workload_queue.cpp
++++ b/src/hle/rt64_workload_queue.cpp
+@@ -702,6 +702,7 @@ namespace RT64 {
+             ext.workloadGraphicsWorker->commandList->resetQueryPool(queryPool.get(), 0, 2);
+             ext.workloadGraphicsWorker->commandList->writeTimestamp(queryPool.get(), 0);
+             framebufferRenderer->endFramebuffers(ext.workloadGraphicsWorker, &workload.drawBuffers, &workload.outputBuffers, workloadConfig.raytracingEnabled);
++            beginCoverageEstimateFrame();
+             framebufferRenderer->recordSetup(ext.workloadGraphicsWorker, bufferUploaders, processRSP ? rspProcessor.get() : nullptr, processWorldVertices ? vertexProcessor.get() : nullptr, &workload.outputBuffers, workloadConfig.raytracingEnabled);
+             
+             // Record all framebuffer pairs.
+@@ -805,10 +806,14 @@ namespace RT64 {
+                         ext.workloadGraphicsWorker->commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(chosenTarget->texture.get(), RenderTextureLayout::SHADER_READ));
+                     }
+ 
++                    // Video core: estimate the pair's coverage for the VI pass.
++                    estimatePairCoverage(ext.workloadGraphicsWorker, ext.shaderLibrary, targetManager.multisampling, colorTarget, depthTarget);
++
+                     // Do the resolve if using MSAA while target override is active and we're on the correct framebuffer pair index.
+                     if (usingMSAA && (overrideTarget != nullptr) && ((uint32_t)overrideTargetFbPairIndex == f)) {
+                         overrideTarget->resize(ext.workloadGraphicsWorker, colorTarget->width, colorTarget->height);
+                         overrideTarget->resolveFromTarget(ext.workloadGraphicsWorker, colorTarget, ext.shaderLibrary);
++                        copyCoverageEstimate(ext.workloadGraphicsWorker, overrideTarget, colorTarget);
+                     }
+ 
+                     const uint64_t writeTimestamp = fbManager.nextWriteTimestamp();
+diff --git a/src/render/rt64_coverage_estimate.h b/src/render/rt64_coverage_estimate.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..4f060e9c70b22f11ec5b7e52b01e662e47b611a2
+--- /dev/null
++++ b/src/render/rt64_coverage_estimate.h
+@@ -0,0 +1,89 @@
++//
++// Video core coverage estimate: per colour target, the estimated RDP coverage
++// and front-surface colour the VI pre-pass reads. The coverage patch copies
++// this file to RT64's src/render/; rt64_coverage_estimate.cpp implements it.
++//
++
++#pragma once
++
++#include <memory>
++#include <vector>
++
++#include "rt64_descriptor_sets.h"
++
++namespace RT64 {
++    struct RenderTarget;
++    struct RenderWorker;
++    struct ShaderLibrary;
++
++    struct CoverageEstimateDescriptorSet : RenderDescriptorSetBase {
++        uint32_t gColor;
++        uint32_t gDepth;
++        uint32_t gEstimate;
++        uint32_t gFrontSamples;
++
++        CoverageEstimateDescriptorSet(RenderDevice *device = nullptr) {
++            builder.begin();
++            gColor = builder.addTexture(1);
++            gDepth = builder.addTexture(2);
++            gEstimate = builder.addReadWriteTexture(3);
++            gFrontSamples = builder.addReadWriteTexture(4);
++            builder.end();
++
++            if (device != nullptr) {
++                create(device);
++            }
++        }
++    };
++
++    // Owned by a RenderTarget. Valid from the estimate after the pair that
++    // last wrote the target until anything marks the target for resolve.
++    struct CoverageEstimate {
++        // rgb: front-surface colour; a: coverage as the RDP stores it /
++        // EstimateCoverageScale (n64_video/coverage_layout.h).
++        std::unique_ptr<RenderTexture> estimate;
++        // The front surface's samples, one bit per sample.
++        std::unique_ptr<RenderTexture> frontSamples;
++        // One descriptor set per estimate recorded in the same frame, so a
++        // set isn't rewritten while the frame's command list still uses it.
++        std::vector<std::unique_ptr<CoverageEstimateDescriptorSet>> descriptorSets;
++        uint32_t descriptorSetsUsed = 0;
++        uint64_t descriptorSetsFrame = 0;
++        // The frame whose depth last filled frontSamples.
++        uint64_t frontSamplesFrame = 0;
++        uint32_t width = 0;
++        uint32_t height = 0;
++        bool valid = false;
++
++        void release();
++    };
++
++    // Whether the raster shader marks anti-aliased samples in colour targets
++    // drawn with `multisampling`: under Original video output, and only with
++    // MSAA, because only a resolve takes the mark off before RT64 reads the
++    // target.
++    bool writesCoverageRecord(const RenderMultisampling &multisampling);
++
++    // Whether resolves must take RT64's raster path, which takes the mark off
++    // each sample before averaging; a hardware resolve can't.
++    bool coverageRecordNeedsRasterResolve();
++
++    // The alpha range a resolve takes the mark off at, or 0 when no colour
++    // target carries it.
++    float coverageRecordAlphaRange(bool usesHDR);
++
++    // Starts a frame's recording on the workload thread: descriptor sets of
++    // the previous frame may be reused.
++    void beginCoverageEstimateFrame();
++
++    // Estimates the coverage of the framebuffer pair just recorded into
++    // colorTarget, with its depth target (null when the pair has none).
++    void estimatePairCoverage(RenderWorker *worker, const ShaderLibrary *shaderLibrary, const RenderMultisampling &multisampling,
++        RenderTarget *colorTarget, RenderTarget *depthTarget);
++
++    // Gives an interpolation target the estimate of the target it was resolved from.
++    void copyCoverageEstimate(RenderWorker *worker, RenderTarget *dstTarget, RenderTarget *srcTarget);
++
++    // The estimate for the VI pre-pass, or null when the target has no valid one.
++    RenderTexture *coverageEstimateTexture(const RenderTarget *target);
++};
+diff --git a/src/render/rt64_framebuffer_renderer.cpp b/src/render/rt64_framebuffer_renderer.cpp
+index d9262e7d85dd136ff6e3c0ddbdcd7d5737ad48c5..626da3dbc3568c3dfda4a4dae790ec4aed69de14 100644
+--- a/src/render/rt64_framebuffer_renderer.cpp
++++ b/src/render/rt64_framebuffer_renderer.cpp
+@@ -4,6 +4,8 @@
+ 
+ #include "rt64_framebuffer_renderer.h"
+ 
++#include "rt64_coverage_estimate.h"
++
+ #include "../include/rt64_extended_gbi.h"
+ 
+ #include "common/rt64_elapsed_timer.h"
+@@ -174,6 +176,7 @@ namespace RT64 {
+         rspSmoothNormalVector.clear();
+         frameParams.viewUbershaders = ubershadersVisible;
+         frameParams.ditherNoiseStrength = ditherNoiseStrength;
++        frameParams.coverageRecord = writesCoverageRecord(multisampling) ? 1 : 0;
+         framebufferCount = 0;
+ 
+         // Create dummy color target if it hasn't been created yet.
+diff --git a/src/render/rt64_raster_shader.cpp b/src/render/rt64_raster_shader.cpp
+index b396b1f0148664cb7b648df0627e83ff5a5c8102..c8a9d85260e65c05b10d719124419e34c54ce419 100644
+--- a/src/render/rt64_raster_shader.cpp
++++ b/src/render/rt64_raster_shader.cpp
+@@ -4,6 +4,9 @@
+ 
+ #include "rt64_raster_shader.h"
+ 
++#include "n64_video/coverage_estimate.hpp"
++#include "n64_video/video_options.hpp"
++
+ #include "xxHash/xxh3.h"
+ 
+ #include "shaders/RenderParams.hlsli.rw.h"
+@@ -363,6 +366,18 @@ namespace RT64 {
+             // These were roughly translated from this article (https://learn.microsoft.com/en-us/windows/win32/api/d3d11/ne-d3d11-d3d11_standard_multisample_quality_levels)
+             // into the bottom right corner of the pixel area to account for the half pixel offset problem.
+             auto &locations = multisampling.sampleLocations;
++
++            // Video core coverage estimate: the RDP's own sample positions.
++            const n64_video::MsaaSamplePattern rdpPattern = n64_video::estimates_coverage(n64_video::active_options()) ?
++                n64_video::msaa_sample_pattern(uint32_t(sampleCount)) : n64_video::MsaaSamplePattern();
++            if (rdpPattern.count == uint32_t(sampleCount)) {
++                for (uint32_t s = 0; s < rdpPattern.count; s++) {
++                    locations[s] = { int8_t(rdpPattern.positions[s].x_sixteenths), int8_t(rdpPattern.positions[s].y_sixteenths) };
++                }
++
++                return multisampling;
++            }
++
+             switch (sampleCount) {
+             case 2:
+                 locations[0] = { 2, 2 };
+diff --git a/src/render/rt64_render_target.cpp b/src/render/rt64_render_target.cpp
+index 3eee4371fd775591d244a463f696a12259eb2bbd..d5ae7243c6f803c509e02a8fe9ad2e7fbf9d2108 100644
+--- a/src/render/rt64_render_target.cpp
++++ b/src/render/rt64_render_target.cpp
+@@ -51,6 +51,7 @@ namespace RT64 {
+         textureResolveDescSet.reset();
+         filterDescSet.reset();
+         fbWriteDescSet.reset();
++        coverageEstimate.release();
+     }
+ 
+     bool RenderTarget::resize(RenderWorker *worker, uint32_t newWidth, uint32_t newHeight) {
+@@ -217,7 +218,7 @@ namespace RT64 {
+     void RenderTarget::resolveFromTarget(RenderWorker *worker, RenderTarget *src, const ShaderLibrary *shaderLibrary) {
+         assert(!usesResolve() && "The target must not be an MSAA target to allow resolving from other targets.");
+ 
+-        const bool hwResolve = shaderLibrary->usesHardwareResolve && worker->device->getCapabilities().resolveRegion;
++        const bool hwResolve = shaderLibrary->usesHardwareResolve && worker->device->getCapabilities().resolveRegion && !coverageRecordNeedsRasterResolve();
+         RenderTextureBarrier resolveBarriers[] = {
+             RenderTextureBarrier(src->texture.get(), hwResolve ? RenderTextureLayout::RESOLVE_SOURCE : RenderTextureLayout::SHADER_READ),
+             RenderTextureBarrier(texture.get(), hwResolve ? RenderTextureLayout::RESOLVE_DEST : RenderTextureLayout::COLOR_WRITE)
+@@ -412,7 +413,7 @@ namespace RT64 {
+             return;
+         }
+ 
+-        const bool hwResolve = shaderLibrary->usesHardwareResolve;
++        const bool hwResolve = shaderLibrary->usesHardwareResolve && !coverageRecordNeedsRasterResolve();
+         RenderTextureBarrier resolveBarriers[] = {
+             RenderTextureBarrier(texture.get(), hwResolve ? RenderTextureLayout::RESOLVE_SOURCE : RenderTextureLayout::SHADER_READ),
+             RenderTextureBarrier(resolvedTexture.get(), hwResolve ? RenderTextureLayout::RESOLVE_DEST : RenderTextureLayout::COLOR_WRITE)
+@@ -452,6 +453,7 @@ namespace RT64 {
+         textureCopyCB.uvScroll.y = float(y);
+         textureCopyCB.uvScale.x = float(width);
+         textureCopyCB.uvScale.y = float(height);
++        textureCopyCB.coverageRecordAlphaRange = coverageRecordAlphaRange(usesHDR);
+ 
+         const ShaderRecord &textureResolve = shaderLibrary->textureResolve;
+         worker->commandList->setPipeline(textureResolve.pipeline.get());
+@@ -466,6 +468,7 @@ namespace RT64 {
+ 
+     void RenderTarget::markForResolve() {
+         resolvedTextureDirty = true;
++        coverageEstimate.valid = false;
+     }
+ 
+     bool RenderTarget::usesResolve() const {
+diff --git a/src/render/rt64_render_target.h b/src/render/rt64_render_target.h
+index 99863597091f31af9fd521c7d800779e43ac090e..a960a47b0e16d43318c4e73c97111cf8a4ef3e80 100644
+--- a/src/render/rt64_render_target.h
++++ b/src/render/rt64_render_target.h
+@@ -12,6 +12,7 @@
+ 
+ #include "rt64_descriptor_sets.h"
+ #include "rt64_render_worker.h"
++#include "rt64_coverage_estimate.h"
+ 
+ namespace RT64 {
+     struct RenderWorker;
+@@ -46,6 +47,7 @@ namespace RT64 {
+         int32_t invMisalignX = 0;
+         bool resolvedTextureDirty = false;
+         bool usesHDR = false;
++        CoverageEstimate coverageEstimate;
+ 
+         RenderTarget(uint32_t addressForName, Framebuffer::Type type, const RenderMultisampling &multisampling, bool usesHDR);
+         ~RenderTarget();
+diff --git a/src/render/rt64_shader_library.cpp b/src/render/rt64_shader_library.cpp
+index 47d84b60e69e9a2533d4d6acc8c4b62821d5a1d3..d62bb83503296abc1406cc7f6137d6b11d410427 100644
+--- a/src/render/rt64_shader_library.cpp
++++ b/src/render/rt64_shader_library.cpp
+@@ -19,6 +19,7 @@
+ #include "shaders/FbWriteDepthCSMS.hlsl.spirv.h"
+ #include "shaders/GaussianFilterRGB3x3CS.hlsl.spirv.h"
+ #include "shaders/BoxFilterCS.hlsl.spirv.h"
++#include "shaders/CoverageEstimateCS.hlsl.spirv.h"
+ #include "shaders/BicubicScalingCS.hlsl.spirv.h"
+ #include "shaders/HistogramAverageCS.hlsl.spirv.h"
+ #include "shaders/HistogramClearCS.hlsl.spirv.h"
+@@ -46,6 +47,8 @@
+ #include "shaders/TextureResolveSamples8XPS.hlsl.spirv.h"
+ #include "shaders/VideoInterfacePSRegular.hlsl.spirv.h"
+ #include "shaders/VideoInterfacePSPixel.hlsl.spirv.h"
++#include "shaders/VideoInterfacePSPrepass.hlsl.spirv.h"
++#include "shaders/VideoInterfacePSCrt.hlsl.spirv.h"
+ #include "shaders/FullScreenVS.hlsl.spirv.h"
+ #include "shaders/Im3DVS.hlsl.spirv.h"
+ #include "shaders/ComposePS.hlsl.spirv.h"
+@@ -65,6 +68,7 @@
+ #   include "shaders/FbWriteDepthCSMS.hlsl.dxil.h"
+ #   include "shaders/GaussianFilterRGB3x3CS.hlsl.dxil.h"
+ #   include "shaders/BoxFilterCS.hlsl.dxil.h"
++#   include "shaders/CoverageEstimateCS.hlsl.dxil.h"
+ #   include "shaders/BicubicScalingCS.hlsl.dxil.h"
+ #   include "shaders/HistogramAverageCS.hlsl.dxil.h"
+ #   include "shaders/HistogramClearCS.hlsl.dxil.h"
+@@ -92,6 +96,8 @@
+ #   include "shaders/TextureResolveSamples8XPS.hlsl.dxil.h"
+ #   include "shaders/VideoInterfacePSRegular.hlsl.dxil.h"
+ #   include "shaders/VideoInterfacePSPixel.hlsl.dxil.h"
++#   include "shaders/VideoInterfacePSPrepass.hlsl.dxil.h"
++#   include "shaders/VideoInterfacePSCrt.hlsl.dxil.h"
+ #   include "shaders/FullScreenVS.hlsl.dxil.h"
+ #   include "shaders/Im3DVS.hlsl.dxil.h"
+ #   include "shaders/ComposePS.hlsl.dxil.h"
+@@ -110,6 +116,7 @@
+ #   include "shaders/FbWriteDepthCSMS.hlsl.metal.h"
+ #   include "shaders/GaussianFilterRGB3x3CS.hlsl.metal.h"
+ #   include "shaders/BoxFilterCS.hlsl.metal.h"
++#   include "shaders/CoverageEstimateCS.hlsl.metal.h"
+ #   include "shaders/BicubicScalingCS.hlsl.metal.h"
+ #   include "shaders/HistogramAverageCS.hlsl.metal.h"
+ #   include "shaders/HistogramClearCS.hlsl.metal.h"
+@@ -137,6 +144,8 @@
+ #   include "shaders/TextureResolveSamples8XPS.hlsl.metal.h"
+ #   include "shaders/VideoInterfacePSRegular.hlsl.metal.h"
+ #   include "shaders/VideoInterfacePSPixel.hlsl.metal.h"
++#   include "shaders/VideoInterfacePSPrepass.hlsl.metal.h"
++#   include "shaders/VideoInterfacePSCrt.hlsl.metal.h"
+ #   include "shaders/FullScreenVS.hlsl.metal.h"
+ #   include "shaders/Im3DVS.hlsl.metal.h"
+ #   include "shaders/ComposePS.hlsl.metal.h"
+@@ -149,6 +158,7 @@
+ #include "shared/rt64_fb_reinterpret.h"
+ #include "shared/rt64_texture_copy.h"
+ #include "shared/rt64_video_interface.h"
++#include "shared/rt64_coverage_estimate_params.h"
+ 
+ #include "rt64_descriptor_sets.h"
+ #include "rt64_render_target.h"
+@@ -282,6 +292,20 @@ namespace RT64 {
+             boxFilter.pipeline = device->createComputePipeline(pipelineDesc);
+         }
+ 
++        // Video core coverage estimate.
++        {
++            CoverageEstimateDescriptorSet descriptorSet;
++            layoutBuilder.begin();
++            layoutBuilder.addPushConstant(0, 0, sizeof(interop::CoverageEstimateCB), RenderShaderStageFlag::COMPUTE);
++            layoutBuilder.addDescriptorSet(descriptorSet);
++            layoutBuilder.end();
++            coverageEstimate.pipelineLayout = layoutBuilder.create(device);
++
++            std::unique_ptr<RenderShader> computeShader = device->createShader(CREATE_SHADER_INPUTS(CoverageEstimateCSBlobDXIL, CoverageEstimateCSBlobSPIRV, CoverageEstimateCSBlobMSL, "CSMain", shaderFormat));
++            RenderComputePipelineDesc pipelineDesc(coverageEstimate.pipelineLayout.get(), computeShader.get(), 8, 8, 1);
++            coverageEstimate.pipeline = device->createComputePipeline(pipelineDesc);
++        }
++
+         // Raytracing compose.
+         {
+             RaytracingComposeDescriptorSet descriptorSet(samplerLibrary);
+@@ -618,6 +642,30 @@ namespace RT64 {
+             pipelineDesc.pixelShader = pixelShader.get();
+             pipelineDesc.pipelineLayout = videoInterfacePixel.pipelineLayout.get();
+             videoInterfacePixel.pipeline = device->createGraphicsPipeline(pipelineDesc);
++
++            // VI pre-pass: reads the frame with Load, so the nearest sampler
++            // only fixes the descriptor layout.
++            std::unique_ptr<RenderShader> prepassShader = device->createShader(CREATE_SHADER_INPUTS(VideoInterfacePSPrepassBlobDXIL, VideoInterfacePSPrepassBlobSPIRV, VideoInterfacePSPrepassBlobMSL, "PSMain", shaderFormat));
++            layoutBuilder.begin();
++            layoutBuilder.addPushConstant(0, 0, sizeof(interop::VideoInterfaceCB), RenderShaderStageFlag::PIXEL);
++            layoutBuilder.addDescriptorSet(nearestDescriptorSet);
++            layoutBuilder.end();
++            videoInterfacePrepass.pipelineLayout = layoutBuilder.create(device);
++            pipelineDesc.pixelShader = prepassShader.get();
++            pipelineDesc.pipelineLayout = videoInterfacePrepass.pipelineLayout.get();
++            videoInterfacePrepass.pipeline = device->createGraphicsPipeline(pipelineDesc);
++
++            // CRT filter: the VI pass's final draw under a CRT preset, with
++            // the pre-pass's inputs.
++            std::unique_ptr<RenderShader> crtShader = device->createShader(CREATE_SHADER_INPUTS(VideoInterfacePSCrtBlobDXIL, VideoInterfacePSCrtBlobSPIRV, VideoInterfacePSCrtBlobMSL, "PSMain", shaderFormat));
++            layoutBuilder.begin();
++            layoutBuilder.addPushConstant(0, 0, sizeof(interop::VideoInterfaceCB), RenderShaderStageFlag::PIXEL);
++            layoutBuilder.addDescriptorSet(nearestDescriptorSet);
++            layoutBuilder.end();
++            videoInterfaceCrt.pipelineLayout = layoutBuilder.create(device);
++            pipelineDesc.pixelShader = crtShader.get();
++            pipelineDesc.pipelineLayout = videoInterfaceCrt.pipelineLayout.get();
++            videoInterfaceCrt.pipeline = device->createGraphicsPipeline(pipelineDesc);
+         }
+     }
+ 
+diff --git a/src/render/rt64_shader_library.h b/src/render/rt64_shader_library.h
+index 6528baa23f662b5ed4560690b535a896154d5d98..f0453a7372a0362cdf5e9bd93f6dc5f6f3a2bcfe 100644
+--- a/src/render/rt64_shader_library.h
++++ b/src/render/rt64_shader_library.h
+@@ -20,6 +20,7 @@ namespace RT64 {
+         // All shaders.
+         ShaderRecord bicubicScaling;
+         ShaderRecord boxFilter;
++        ShaderRecord coverageEstimate;
+         ShaderRecord compose;
+         ShaderRecord debug;
+         ShaderRecord fbChangesClear;
+@@ -57,6 +58,8 @@ namespace RT64 {
+         ShaderRecord videoInterfaceLinear;
+         ShaderRecord videoInterfaceNearest;
+         ShaderRecord videoInterfacePixel;
++        ShaderRecord videoInterfacePrepass;
++        ShaderRecord videoInterfaceCrt;
+ 
+         ShaderLibrary(bool usesHDR, bool usesHardwareResolve);
+         ~ShaderLibrary();
+diff --git a/src/render/rt64_vi_renderer.cpp b/src/render/rt64_vi_renderer.cpp
+index a775b56e20ad44b23f72423ac0e5a30857ad5518..789809355b4503c9ece55944af8defd4d979d9f7 100644
+--- a/src/render/rt64_vi_renderer.cpp
++++ b/src/render/rt64_vi_renderer.cpp
+@@ -7,6 +7,11 @@
+ #include "shared/rt64_hlsl.h"
+ #include "shared/rt64_video_interface.h"
+ 
++#include "n64_video/colour_reduction.hpp"
++#include "n64_video/crt_filter.hpp"
++#include "n64_video/gamma_dither.hpp"
++#include "n64_video/vi_filtering.hpp"
++
+ namespace RT64 {
+     // VIRenderer
+ 
+@@ -41,7 +46,19 @@ namespace RT64 {
+         return windowCenter + relativeCoordinate * relativeScale;
+     }
+ 
+-    void VIRenderer::render(const RenderParams &p) {
++    void VIRenderer::render(const RenderParams &frameParams) {
++        // When the pre-pass runs, its native-resolution output replaces the
++        // frame this pass scales to the window.
++        RenderParams p = frameParams;
++        hlslpp::float2 videoResolution = computeHDSize(hlslpp::float2(p.vi->fbSize()), p.resolutionScale, p.downsamplingScale);
++        const bool prepassDrawn = renderPrepass(frameParams);
++        if (prepassDrawn) {
++            p.texture = prepass.texture.get();
++            p.textureWidth = prepass.width;
++            p.textureHeight = prepass.height;
++            videoResolution = hlslpp::float2(float(prepass.width), float(prepass.height));
++        }
++
+         const ShaderRecord *shader = nullptr;
+         const RenderSampler *sampler = nullptr;
+         switch (p.filtering) {
+@@ -60,6 +77,14 @@ namespace RT64 {
+             break;
+         }
+ 
++        // Video core CRT filter: under a CRT preset it draws the pre-pass
++        // output to the window in place of the pixel-scaling filter.
++        const uint32_t crtPreset = prepassDrawn ? n64_video::crt_shader_preset(n64_video::active_options()) : n64_video::crt::CrtPresetOff;
++        if (crtPreset != n64_video::crt::CrtPresetOff) {
++            shader = &p.shaderLibrary->videoInterfaceCrt;
++            sampler = p.shaderLibrary->samplerLibrary.nearest.borderBorder.get();
++        }
++
+         if ((descriptorSet == nullptr) || (descriptorSetSampler != sampler)) {
+             descriptorSet = std::make_unique<VideoInterfaceDescriptorSet>(sampler, p.device);
+             descriptorSetSampler = sampler;
+@@ -73,10 +98,14 @@ namespace RT64 {
+         p.commandList->setViewports(viewport);
+         p.commandList->setScissors(scissor);
+ 
+-        interop::VideoInterfaceCB pushConstants;
+-        pushConstants.videoResolution = computeHDSize(hlslpp::float2(p.vi->fbSize()), p.resolutionScale, p.downsamplingScale);
++        interop::VideoInterfaceCB pushConstants = {};
++        pushConstants.videoResolution = videoResolution;
+         pushConstants.textureResolution = { float(p.textureWidth), float(p.textureHeight) };
+         pushConstants.gamma = p.vi->gamma();
++        pushConstants.crtPreset = crtPreset;
++        pushConstants.crtOutputWidth = viewport.width;
++        pushConstants.crtOutputHeight = viewport.height;
++        pushConstants.crtCurvature = n64_video::crt_shader_curvature(n64_video::active_options());
+ 
+         p.commandList->setPipeline(shader->pipeline.get());
+         p.commandList->setGraphicsPipelineLayout(shader->pipelineLayout.get());
+@@ -86,6 +115,94 @@ namespace RT64 {
+         p.commandList->drawInstanced(3, 1, 0, 0);
+     }
+ 
++    // Draws the frame into prepass.texture, one row per framebuffer row and
++    // one column per sample of the active scanline: reduced to the console's
++    // 16-bit colour (16-bit framebuffers only), anti-aliased or
++    // dither-filtered, divot-filtered, resampled and given gamma-dither noise
++    // as the video core decides from its options and the VI registers.
++    // Returns false, drawing nothing, when VI filtering is off or the VI shows
++    // nothing.
++    bool VIRenderer::renderPrepass(const RenderParams &p) {
++        const n64_video::VideoOptions &options = n64_video::active_options();
++        const uint32_t viControl = p.vi->status.word;
++        if (!n64_video::vi_filtering_enabled(options, viControl) || (p.framebuffer == nullptr)) {
++            return false;
++        }
++
++        const n64_video::ColourReduction reduction = n64_video::colour_reduction(options, viControl);
++        const n64_video::ViFiltering filtering = n64_video::vi_filtering({ viControl, p.vi->hRegion.word, p.vi->xTransform.word });
++        const hlslpp::uint2 framebufferSize = p.vi->fbSize();
++        const uint32_t framebufferWidth = framebufferSize.x;
++        const uint32_t width = filtering.active_width;
++        const uint32_t height = framebufferSize.y;
++        const bool hasFrame = (framebufferWidth > 0) && (height > 0) && (width > 0) && (filtering.x_step > 0);
++        if (!hasFrame) {
++            return false;
++        }
++
++        // Replacing the texture frees it while this frame records. That's
++        // safe for the same reason RT64 replaces descriptorSet in render()
++        // and resizes render targets on this thread: the present queue waits
++        // for each frame's command list before it records the next, so no
++        // submitted work still uses the old texture.
++        if ((prepass.texture == nullptr) || (prepass.width != width) || (prepass.height != height)) {
++            prepass.framebuffer.reset();
++            prepass.texture = p.device->createTexture(RenderTextureDesc::ColorTarget(width, height, RenderFormat::B8G8R8A8_UNORM));
++            const RenderTexture *colorAttachment = prepass.texture.get();
++            prepass.framebuffer = p.device->createFramebuffer(RenderFramebufferDesc(&colorAttachment, 1));
++            prepass.width = width;
++            prepass.height = height;
++        }
++
++        if (prepass.descriptorSet == nullptr) {
++            prepass.descriptorSet = std::make_unique<VideoInterfaceDescriptorSet>(p.shaderLibrary->samplerLibrary.nearest.borderBorder.get(), p.device);
++        }
++
++        // With a coverage estimate the pre-pass reads it instead of the
++        // averaged frame: each pixel's front colour and coverage.
++        const RenderTexture *input = p.texture;
++        if (p.coverageTexture != nullptr) {
++            p.commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(p.coverageTexture, RenderTextureLayout::SHADER_READ));
++            input = p.coverageTexture;
++        }
++
++        prepass.descriptorSet->setTexture(prepass.descriptorSet->gInput, input, RenderTextureLayout::SHADER_READ);
++
++        // No gamma: the VI pass after the pre-pass applies it.
++        interop::VideoInterfaceCB pushConstants = {};
++        pushConstants.videoResolution = computeHDSize(hlslpp::float2(framebufferSize), p.resolutionScale, p.downsamplingScale);
++        pushConstants.textureResolution = { float(p.textureWidth), float(p.textureHeight) };
++        pushConstants.colourReduction = reduction.enabled ? 1 : 0;
++        pushConstants.ditherPattern = uint32_t(reduction.pattern);
++        pushConstants.ditherFilter = filtering.dither_filter ? 1 : 0;
++        pushConstants.resampling = uint32_t(filtering.resampling);
++        pushConstants.xStep = filtering.x_step;
++        pushConstants.xOffset = filtering.x_offset;
++        pushConstants.framebufferWidth = framebufferWidth;
++        pushConstants.framebufferHeight = height;
++        pushConstants.coverageInput = (p.coverageTexture != nullptr) ? 1 : 0;
++        pushConstants.viAntiAliasing = filtering.anti_aliasing ? 1 : 0;
++        pushConstants.divot = filtering.divot ? 1 : 0;
++        n64_video::report_gamma_dither(filtering.gamma_dither, viControl);
++        pushConstants.gammaDither = (filtering.gamma_dither == n64_video::GammaDither::noise) ? 1 : 0;
++        pushConstants.noiseFrame = prepass.frameCounter++;
++
++        const ShaderRecord &shader = p.shaderLibrary->videoInterfacePrepass;
++        p.commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(prepass.texture.get(), RenderTextureLayout::COLOR_WRITE));
++        p.commandList->setFramebuffer(prepass.framebuffer.get());
++        p.commandList->setViewports(RenderViewport(0.0f, 0.0f, float(width), float(height)));
++        p.commandList->setScissors(RenderRect(0, 0, int32_t(width), int32_t(height)));
++        p.commandList->setPipeline(shader.pipeline.get());
++        p.commandList->setGraphicsPipelineLayout(shader.pipelineLayout.get());
++        p.commandList->setGraphicsDescriptorSet(prepass.descriptorSet->get(), 0);
++        p.commandList->setGraphicsPushConstants(0, &pushConstants);
++        p.commandList->setVertexBuffers(0, nullptr, 0, nullptr);
++        p.commandList->drawInstanced(3, 1, 0, 0);
++        p.commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(prepass.texture.get(), RenderTextureLayout::SHADER_READ));
++        p.commandList->setFramebuffer(p.framebuffer);
++        return true;
++    }
++
+     void VIRenderer::getViewportAndScissor(const RenderSwapChain *swapChain, const VI &vi, hlslpp::float2 resolutionScale, uint32_t downsamplingScale, bool removeBlackBorders, RenderViewport &viewport, RenderRect &scissor) {
+         // We define three different coordinate spaces to work with to translate the VI parameters into the Window.
+         //
+diff --git a/src/render/rt64_vi_renderer.h b/src/render/rt64_vi_renderer.h
+index d89b6b38b7c8a0bef7e8c9b905859f232d3d909f..5019e1f0f193bf77e832c2220ece352cb5635f81 100644
+--- a/src/render/rt64_vi_renderer.h
++++ b/src/render/rt64_vi_renderer.h
+@@ -15,6 +15,22 @@ namespace RT64 {
+         std::unique_ptr<VideoInterfaceDescriptorSet> descriptorSet;
+         const RenderSampler *descriptorSetSampler = nullptr;
+ 
++        // The VI pre-pass's native-resolution output and its input binding.
++        struct Prepass {
++            std::unique_ptr<VideoInterfaceDescriptorSet> descriptorSet;
++            std::unique_ptr<RenderTexture> texture;
++            std::unique_ptr<RenderFramebuffer> framebuffer;
++            uint32_t width = 0;
++            uint32_t height = 0;
++            // Advances each time renderPrepass draws. RT64's present queue
++            // calls render() once per frame it presents, interpolated frames
++            // included, so while the pre-pass runs the gamma-dither noise
++            // changes every presented frame; frames it skips (VI filtering
++            // off, nothing shown) don't advance it.
++            uint32_t frameCounter = 0;
++        };
++        Prepass prepass;
++
+         struct RenderParams {
+             RenderDevice *device = nullptr;
+             RenderCommandList *commandList = nullptr;
+@@ -29,11 +45,18 @@ namespace RT64 {
+             UserConfiguration::Filtering filtering = UserConfiguration::Filtering::Linear;
+             const VI *vi = nullptr;
+             bool removeBlackBorders = false;
++            // The framebuffer the VI pass draws into, rebound after the
++            // pre-pass. Without it the pre-pass doesn't run.
++            const RenderFramebuffer *framebuffer = nullptr;
++            // The frame's coverage estimate (front colour, coverage in alpha).
++            // When set, the pre-pass reads it instead of `texture`.
++            RenderTexture *coverageTexture = nullptr;
+         };
+ 
+         VIRenderer();
+         ~VIRenderer();
+         void render(const RenderParams &p);
++        bool renderPrepass(const RenderParams &p);
+         static void getViewportAndScissor(const RenderSwapChain *swapChain, const VI &vi, hlslpp::float2 resolutionScale, uint32_t downsamplingScale, bool removeBlackBorders, RenderViewport &viewport, RenderRect &scissor);
+     };
+ };
+\ No newline at end of file
+diff --git a/src/shaders/CoverageEstimateCS.hlsl b/src/shaders/CoverageEstimateCS.hlsl
+new file mode 100644
+index 0000000000000000000000000000000000000000..f20c0eeb4789b3f68581ff8153ad9dff9bb57806
+--- /dev/null
++++ b/src/shaders/CoverageEstimateCS.hlsl
+@@ -0,0 +1,154 @@
++//
++// Video core coverage estimate: estimates each RDP pixel's coverage and
++// front-surface colour from a colour target's MSAA samples, for the VI
++// pre-pass's anti-aliasing and divot filter. The coverage patch copies this
++// file to RT64's src/shaders/.
++//
++// It follows the reference in n64_video/coverage_estimate.hpp
++// (front_depth_tolerance, front_surface_mask, pixel_coverage); keep the two
++// in step. The record's layout and decoding are shared with it through
++// rt64_coverage_layout.h (n64_video/coverage_layout.h).
++//
++
++#include "shared/rt64_coverage_estimate_params.h"
++#include "shared/rt64_coverage_layout.h"
++
++#define BLOCK_SIZE 8
++
++[[vk::push_constant]] ConstantBuffer<CoverageEstimateCB> gConstants : register(b0);
++Texture2DMS<float4> gColor : register(t1);
++Texture2DMS<float> gDepth : register(t2);
++// rgb: front-surface colour; a: coverage as the RDP stores it (0-7) /
++// EstimateCoverageScale.
++RWTexture2D<float4> gEstimate : register(u3);
++// The front surface's samples, one bit per sample. Read back by pairs
++// without a depth target; the format lets Vulkan read it without
++// shaderStorageImageReadWithoutFormat.
++[[vk::image_format("r32ui")]] RWTexture2D<uint> gFrontSamples : register(u4);
++
++static const uint MaxSamples = 8;
++
++struct SampleRecord {
++    bool partial;
++    uint eighths;
++};
++
++// What the draws left in the sample's alpha (CoverageRecord.hlsli), as
++// n64_video::decode_sample_record reads it.
++SampleRecord DecodeSampleRecord(float alpha) {
++    const uint value = uint(round(saturate(alpha) * gConstants.alphaRange));
++    const uint fullValue = uint(gConstants.alphaRange);
++    SampleRecord record;
++    record.partial = IsPartialRecord(value, fullValue);
++    record.eighths = SampleEighths(Rt64CoverageValue(value, fullValue));
++    return record;
++}
++
++int2 ClampToTarget(int2 pixel) {
++    return clamp(pixel, int2(0, 0), int2(gConstants.resolution) - 1);
++}
++
++// The rendered pixel that holds sample s of RDP pixel `pixel`.
++int2 SamplePixel(int2 pixel, uint s) {
++    const uint bits = gConstants.samplePixelOffsets >> (2 * s);
++    return ClampToTarget(pixel + int2(bits & 1, (bits >> 1) & 1));
++}
++
++// The nearest sample depth of one rendered pixel.
++float RenderedFrontDepth(int2 pixel) {
++    pixel = ClampToTarget(pixel);
++    float front = gDepth.Load(pixel, 0);
++    for (uint s = 1; s < gConstants.sampleCount; s++) {
++        front = min(front, gDepth.Load(pixel, s));
++    }
++
++    return front;
++}
++
++// 8 * dz, dz the local depth slope per axis taken as the smaller difference
++// to the two neighbours, so a silhouette on one side doesn't widen it.
++float FrontDepthTolerance(int2 pixel) {
++    const float centre = RenderedFrontDepth(pixel);
++    const float slopeX = min(abs(centre - RenderedFrontDepth(pixel + int2(-1, 0))), abs(RenderedFrontDepth(pixel + int2(1, 0)) - centre));
++    const float slopeY = min(abs(centre - RenderedFrontDepth(pixel + int2(0, -1))), abs(RenderedFrontDepth(pixel + int2(0, 1)) - centre));
++    return gConstants.depthToleranceFactor * (slopeX + slopeY) + gConstants.minimumDepthTolerance;
++}
++
++uint FrontSurfaceFromDepth(int2 pixel) {
++    float depths[MaxSamples];
++    float front = 1.0f;
++    for (uint s = 0; s < gConstants.sampleCount; s++) {
++        depths[s] = gDepth.Load(SamplePixel(pixel, s), s);
++        front = (s == 0) ? depths[s] : min(front, depths[s]);
++    }
++
++    const float limit = front + FrontDepthTolerance(pixel);
++    uint mask = 0;
++    for (uint s = 0; s < gConstants.sampleCount; s++) {
++        if (depths[s] <= limit) {
++            mask |= 1U << s;
++        }
++    }
++
++    return mask;
++}
++
++[numthreads(BLOCK_SIZE, BLOCK_SIZE, 1)]
++void CSMain(uint2 coord : SV_DispatchThreadID) {
++    if ((coord.x >= gConstants.resolution.x) || (coord.y >= gConstants.resolution.y)) {
++        return;
++    }
++
++    const int2 pixel = int2(coord);
++    const uint count = gConstants.sampleCount;
++    const uint allSamples = (1U << count) - 1;
++    uint front = allSamples;
++    if (gConstants.useDepth != 0) {
++        front = FrontSurfaceFromDepth(pixel);
++        gFrontSamples[coord] = front;
++    }
++    else if (gConstants.storedFrontValid != 0) {
++        front = gFrontSamples[coord] & allSamples;
++    }
++
++    if (front == 0) {
++        front = allSamples;
++    }
++
++    // An anti-aliased front covers the share of samples it covers; anything
++    // else is drawn whole by its top-left sample (sample 0).
++    bool frontPartial = true;
++    uint frontEighths = 0;
++    for (uint s = 0; s < count; s++) {
++        if ((front & (1U << s)) != 0) {
++            const SampleRecord record = DecodeSampleRecord(gColor.Load(SamplePixel(pixel, s), s).a);
++            frontPartial = frontPartial && record.partial;
++            frontEighths += record.eighths;
++        }
++    }
++
++    uint coveredEighths;
++    uint colourMask;
++    if (frontPartial) {
++        coveredEighths = (frontEighths + count / 2) / count;
++        const uint ownFront = front & gConstants.ownPixelMask;
++        colourMask = (ownFront != 0) ? ownFront : front;
++    }
++    else {
++        const SampleRecord topLeft = DecodeSampleRecord(gColor.Load(pixel, 0).a);
++        coveredEighths = topLeft.partial ? SampleFullEighths : topLeft.eighths;
++        colourMask = 1;
++    }
++
++    const uint coverage = max(min(coveredEighths, SampleFullEighths), 1U) - 1;
++    float3 colour = 0.0f;
++    uint colourSamples = 0;
++    for (uint s = 0; s < count; s++) {
++        if ((colourMask & (1U << s)) != 0) {
++            colour += gColor.Load(SamplePixel(pixel, s), s).rgb;
++            colourSamples++;
++        }
++    }
++
++    gEstimate[coord] = float4(colour / float(colourSamples), float(coverage) / EstimateCoverageScale);
++}
+diff --git a/src/shaders/CoverageRecord.hlsli b/src/shaders/CoverageRecord.hlsli
+new file mode 100644
+index 0000000000000000000000000000000000000000..39b4fdee34cd78c557f2a3a5ee07969ff51fa2ae
+--- /dev/null
++++ b/src/shaders/CoverageRecord.hlsli
+@@ -0,0 +1,47 @@
++//
++// Video core coverage estimate: the per-sample render-mode record in the
++// colour target's alpha. The coverage patch copies this file to RT64's
++// src/shaders/; RasterPS writes the record and TextureResolvePS takes it off
++// before averaging.
++//
++// The layout is n64_video's coverage_layout.h; the rule for which draws
++// record partial coverage follows n64_video::records_partial
++// (coverage_estimate.hpp), here on RT64's other mode.
++//
++
++#pragma once
++
++#include "shared/rt64_coverage_layout.h"
++#include "shared/rt64_other_mode.h"
++
++uint CoverageAlphaValue(float alpha, float alphaRange) {
++    return uint(round(saturate(alpha) * alphaRange));
++}
++
++// The colour target's alpha for a sample: RT64's own coverage value
++// (`rt64Alpha`), plus the partial record for an anti-aliased clamped draw
++// (AA_EN with CVG_DST_CLAMP, not copy or fill). Every other draw writes
++// RT64's value unchanged: CVG_DST_FULL, copy, fill and draws without AA_EN
++// read as a full pixel, and CVG_DST_SAVE and CVG_DST_WRAP, which RT64 blends
++// additively, keep the record of the draw under them.
++float CoverageRecordAlpha(OtherMode otherMode, float rt64Alpha, float alphaRange) {
++    const bool copyOrFill = (otherMode.cycleType() == G_CYC_COPY) || (otherMode.cycleType() == G_CYC_FILL);
++    const bool partial = (otherMode.cvgDst() == CVG_DST_CLAMP) && otherMode.aaEn() && !copyOrFill;
++    if (!partial) {
++        return rt64Alpha;
++    }
++
++    return float(CoverageAlphaValue(rt64Alpha, alphaRange) + PartialRecordMarker) / alphaRange;
++}
++
++// A sample as RT64 computed it, the record taken off its alpha. `alphaRange`
++// is 0 when no record is written.
++float4 CoverageRecordStripped(float4 sample, float alphaRange) {
++    if (alphaRange == 0.0f) {
++        return sample;
++    }
++
++    const uint fullValue = uint(alphaRange);
++    sample.a = float(Rt64CoverageValue(CoverageAlphaValue(sample.a, alphaRange), fullValue)) / alphaRange;
++    return sample;
++}
+diff --git a/src/shaders/CrtFilter.hlsli b/src/shaders/CrtFilter.hlsli
+new file mode 100644
+index 0000000000000000000000000000000000000000..6a2f57c75be9b09eb79dadf2d071a160da64c34c
+--- /dev/null
++++ b/src/shaders/CrtFilter.hlsli
+@@ -0,0 +1,124 @@
++//
++// Video core CRT filter: draws a native-resolution picture to an output
++// rectangle as a CRT would show it. A standalone include: it knows neither
++// RT64 nor the N64, so any renderer can call CrtFilter from a pixel shader
++// that covers the picture's rectangle. The per-channel arithmetic and the
++// CRT preset table live in crt_filter.h, which the C++ tests share.
++//
++// Colour order: the source holds the signal the display receives; the video
++// connection's luma/chroma blur runs on that signal (in gamma space, in YIQ),
++// it is decoded to linear light with the preset's CRT gamma, each scanline is
++// filtered along its row, scanlines and mask are applied in linear light, and
++// the result is encoded as sRGB for a UNORM swapchain.
++//
++// Our own HLSL after Timothy Lottes' public-domain CRT approach (ADR 0004).
++//
++
++#ifndef CRT_FILTER_HLSLI
++#define CRT_FILTER_HLSLI
++
++#include "crt_filter.h"
++
++// One source pixel's signal: the source with the remaining signal gamma
++// applied. Columns outside the picture repeat its edge.
++CrtTriple CrtFetchSignal(Texture2D<float4> source, int2 sourceSize, int x, int row, float signalGamma) {
++    const int column = clamp(x, 0, sourceSize.x - 1);
++    const float3 signal = pow(saturate(source.Load(int3(column, row, 0)).rgb), signalGamma);
++    return CrtMakeTriple(signal.r, signal.g, signal.b);
++}
++
++// A scanline's colour at `sourceX` (in source pixels from the left edge), in
++// linear light. Each source row's signal is first blurred as the preset's
++// video connection does (luma and chroma apart), then decoded; the scanline
++// is a normalised horizontal Gaussian of the nearest decoded pixels. A
++// scanline of an interlaced picture shows the average of its row pair.
++// Scanlines outside the picture are black.
++float3 CrtRowColor(Texture2D<float4> source, int2 sourceSize, float sourceX, int scanline, uint rowsPerScanline, float signalGamma, uint preset, CrtSignalKernels kernels) {
++    const int scanlineCount = sourceSize.y / int(rowsPerScanline);
++    if ((scanline < 0) || (scanline >= scanlineCount)) {
++        return float3(0.0f, 0.0f, 0.0f);
++    }
++
++    const int nearest = int(floor(sourceX));
++    const float offset = sourceX - (float(nearest) + 0.5f);
++    const int windowStart = nearest - CrtRowTapRadius - CrtSignalKernelRadius;
++    float3 light[2 * CrtRowTapRadius + 1];
++    [unroll] for (int tap = 0; tap <= 2 * CrtRowTapRadius; tap++) {
++        light[tap] = float3(0.0f, 0.0f, 0.0f);
++    }
++
++    for (uint row = 0; row < rowsPerScanline; row++) {
++        const int sourceRow = scanline * int(rowsPerScanline) + int(row);
++        CrtTriple window[CrtSignalWindowTaps];
++        [unroll] for (uint i = 0; i < CrtSignalWindowTaps; i++) {
++            window[i] = CrtFetchSignal(source, sourceSize, windowStart + int(i), sourceRow, signalGamma);
++        }
++        [unroll] for (int tap = 0; tap <= 2 * CrtRowTapRadius; tap++) {
++            const CrtTriple signal = CrtBlurSignal(window, CrtSignalKernelRadius + tap, kernels);
++            light[tap] += float3(CrtDecode(signal.x, preset), CrtDecode(signal.y, preset), CrtDecode(signal.z, preset));
++        }
++    }
++
++    float3 color = float3(0.0f, 0.0f, 0.0f);
++    float totalWeight = 0.0f;
++    [unroll] for (int tap = -CrtRowTapRadius; tap <= CrtRowTapRadius; tap++) {
++        const float weight = CrtPixelWeight(offset - float(tap), preset);
++        color += weight * light[tap + CrtRowTapRadius];
++        totalWeight += weight;
++    }
++
++    return color / (totalWeight * float(rowsPerScanline));
++}
++
++// The CRT filter's output for one pixel of the output rectangle.
++// - source, sourceSize: the native-resolution picture and its size in pixels.
++// - outputPosition: the pixel's centre, in output pixels from the rectangle's
++//   top-left corner; outputSize: the rectangle's size in output pixels.
++// - preset: a CRT preset id from crt_filter.h (not CrtPresetOff).
++// - curvature: screen curvature. The picture bends by the preset's curvature
++//   and fits inside the rectangle, black outside, with a vignette and rounded
++//   corners; the mask stays on whole output pixels. Off leaves the picture
++//   flat and fills the rectangle.
++// - signalGamma: an exponent the source still needs before it is the
++//   display's signal (a console's gamma stage, for example); 1 for none.
++// Returns the sRGB-encoded colour, alpha 1.
++float4 CrtFilter(Texture2D<float4> source, int2 sourceSize, float2 outputPosition, float2 outputSize, uint preset, bool curvature, float signalGamma) {
++    const uint rowsPerScanline = CrtRowsPerScanline(uint(sourceSize.y));
++    const uint scanlineCount = CrtScanlineCount(uint(sourceSize.y));
++    // Where the picture is sampled: the output position, warped by curvature.
++    const float2 picturePosition = float2(
++        CrtCurvedX(outputPosition.x, outputPosition.y, outputSize.x, outputSize.y, preset, curvature),
++        CrtCurvedY(outputPosition.x, outputPosition.y, outputSize.x, outputSize.y, preset, curvature));
++    // The vignette and rounded corners, in linear light before the mask.
++    float shade = 1.0f;
++    if (curvature) {
++        shade = CrtVignette(picturePosition.x, picturePosition.y, outputSize.x, outputSize.y) *
++            CrtPictureCoverage(picturePosition.x, picturePosition.y, outputSize.x, outputSize.y);
++        if (shade <= 0.0f) {
++            return float4(0.0f, 0.0f, 0.0f, 1.0f);
++        }
++    }
++
++    const float sourceX = picturePosition.x / outputSize.x * float(sourceSize.x);
++    const float scanlinePosition = CrtScanlinePosition(picturePosition.y, outputSize.y, scanlineCount);
++    const int scanline = int(floor(scanlinePosition));
++    const float distance = scanlinePosition - (float(scanline) + 0.5f);
++
++    // The signal blur's kernels depend only on the preset.
++    const CrtSignalKernels kernels = CrtMakeSignalKernels(preset);
++    const float3 above = shade * CrtRowColor(source, sourceSize, sourceX, scanline - 1, rowsPerScanline, signalGamma, preset, kernels);
++    const float3 centre = shade * CrtRowColor(source, sourceSize, sourceX, scanline, rowsPerScanline, signalGamma, preset, kernels);
++    const float3 below = shade * CrtRowColor(source, sourceSize, sourceX, scanline + 1, rowsPerScanline, signalGamma, preset, kernels);
++
++    // The mask follows whole output pixels, not the warp (a warped mask would
++    // land between pixels and beat with them).
++    const uint column = uint(max(floor(outputPosition.x), 0.0f));
++    const uint row = uint(max(floor(outputPosition.y), 0.0f));
++    const float3 light = float3(
++        CrtChannelAt(above.r, centre.r, below.r, distance, column, row, 0, preset),
++        CrtChannelAt(above.g, centre.g, below.g, distance, column, row, 1, preset),
++        CrtChannelAt(above.b, centre.b, below.b, distance, column, row, 2, preset));
++    return float4(CrtEncodeSrgb(light.r), CrtEncodeSrgb(light.g), CrtEncodeSrgb(light.b), 1.0f);
++}
++
++#endif // CRT_FILTER_HLSLI
+diff --git a/src/shaders/RasterPS.hlsl b/src/shaders/RasterPS.hlsl
+index 54573e5dc0d4bf7f0219d07e91289c61a64def39..b23ab3cd174a3791dd1a9ac6adb7a53032e8392f 100644
+--- a/src/shaders/RasterPS.hlsl
++++ b/src/shaders/RasterPS.hlsl
+@@ -11,6 +11,7 @@
+ #include "Library.hlsli"
+ #include "Random.hlsli"
+ #include "TextureSampler.hlsli"
++#include "CoverageRecord.hlsli"
+ 
+ [[vk::push_constant]] ConstantBuffer<RasterParams> gConstants : register(b0, space0);
+ 
+@@ -254,6 +255,12 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
+         resultColor.a = resultCvg;
+     }
+     
++    // Video core coverage estimate: mark the sample when the draw
++    // anti-aliases, next to RT64's coverage value.
++    if (FrParams.coverageRecord != 0) {
++        resultColor.a = CoverageRecordAlpha(otherMode, resultColor.a, cvgRange);
++    }
++
+     // Add highlight color to the last step.
+     uint highlightColorUint = instanceRenderIndices[gConstants.renderIndex].highlightColor;
+     if (highlightColorUint > 0) {
+diff --git a/src/shaders/TextureResolvePS.hlsl b/src/shaders/TextureResolvePS.hlsl
+index 762e884936ed82356892f5afe97dee3f6d8a0f75..b281b7535366aa72551f25b6e9d1046cbbe56ffa 100644
+--- a/src/shaders/TextureResolvePS.hlsl
++++ b/src/shaders/TextureResolvePS.hlsl
+@@ -3,37 +3,43 @@
+ //
+ 
+ #include "shared/rt64_texture_copy.h"
++#include "CoverageRecord.hlsli"
+ 
+ [[vk::push_constant]] ConstantBuffer<TextureCopyCB> gConstants : register(b0);
+ 
+ Texture2DMS<float4> gInput : register(t1);
+ 
++// Video core coverage estimate: one sample as RT64 computed it.
++float4 ResolveSampleLoad(uint2 pixelPos, uint sampleIndex) {
++    return CoverageRecordStripped(gInput.Load(pixelPos, sampleIndex), gConstants.coverageRecordAlphaRange);
++}
++
+ float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET {
+     uint2 pixelPos = gConstants.uvScroll + uv.xy * gConstants.uvScale;
+ #if defined(SAMPLES_8X)
+     return (
+-        gInput.Load(pixelPos, 0) + 
+-        gInput.Load(pixelPos, 1) +
+-        gInput.Load(pixelPos, 2) + 
+-        gInput.Load(pixelPos, 3) +
+-        gInput.Load(pixelPos, 4) + 
+-        gInput.Load(pixelPos, 5) + 
+-        gInput.Load(pixelPos, 6) +
+-        gInput.Load(pixelPos, 7)
++        ResolveSampleLoad(pixelPos, 0) + 
++        ResolveSampleLoad(pixelPos, 1) +
++        ResolveSampleLoad(pixelPos, 2) + 
++        ResolveSampleLoad(pixelPos, 3) +
++        ResolveSampleLoad(pixelPos, 4) + 
++        ResolveSampleLoad(pixelPos, 5) + 
++        ResolveSampleLoad(pixelPos, 6) +
++        ResolveSampleLoad(pixelPos, 7)
+     ) / 8.0f;
+ #elif defined(SAMPLES_4X)
+     return (
+-        gInput.Load(pixelPos, 0) + 
+-        gInput.Load(pixelPos, 1) +
+-        gInput.Load(pixelPos, 2) + 
+-        gInput.Load(pixelPos, 3)
++        ResolveSampleLoad(pixelPos, 0) + 
++        ResolveSampleLoad(pixelPos, 1) +
++        ResolveSampleLoad(pixelPos, 2) + 
++        ResolveSampleLoad(pixelPos, 3)
+     ) / 4.0f;
+ #elif defined(SAMPLES_2X)
+     return (
+-        gInput.Load(pixelPos, 0) + 
+-        gInput.Load(pixelPos, 1)
++        ResolveSampleLoad(pixelPos, 0) + 
++        ResolveSampleLoad(pixelPos, 1)
+     ) / 2.0f;
+ #else
+-    return gInput.Load(pixelPos, 0);
++    return ResolveSampleLoad(pixelPos, 0);
+ #endif
+ }
+\ No newline at end of file
+diff --git a/src/shaders/VideoInterfacePS.hlsl b/src/shaders/VideoInterfacePS.hlsl
+index c1321798d312126982c1ccf6f86512ff5c153bdd..44198de42d84059f29f5112fc60771357528ea9c 100644
+--- a/src/shaders/VideoInterfacePS.hlsl
++++ b/src/shaders/VideoInterfacePS.hlsl
+@@ -3,6 +3,7 @@
+ //
+ 
+ #include "shared/rt64_video_interface.h"
++#include "shared/rt64_coverage_layout.h"
+ 
+ [[vk::push_constant]] ConstantBuffer<VideoInterfaceCB> gConstants : register(b0);
+ Texture2D<float4> gInput : register(t1);
+@@ -32,10 +33,200 @@ float4 PixelAntialiasing(float2 uv) {
+     return SampleInput(uvTexspace / gConstants.textureResolution);
+ }
+ 
++#ifdef VI_PREPASS
++// Native-resolution VI pre-pass: one invocation per output sample of each
++// framebuffer row. It reduces a 16-bit frame to the RDP's 16-bit colour, runs
++// VI anti-aliasing or the dither filter, then the divot filter, resamples
++// the row to the active scanline width and adds gamma-dither noise.
++
++// RDP colour-dither matrices, indexed by ((y & 3) << 2) | (x & 3). Same
++// values as RT64's DitherPatternMagicSquare and DitherPatternBayer.
++static const uint ViDitherMagicSquare[16] = { 0, 6, 1, 7, 4, 2, 5, 3, 3, 5, 2, 4, 7, 1, 6, 0 };
++static const uint ViDitherBayer[16] = { 0, 4, 1, 5, 4, 0, 5, 1, 3, 7, 2, 6, 7, 3, 6, 2 };
++
++uint ViDitherValue(int2 pixel) {
++    const uint index = ((uint(pixel.y) & 3) << 2) | (uint(pixel.x) & 3);
++    return (gConstants.ditherPattern == 1) ? ViDitherBayer[index] : ViDitherMagicSquare[index];
++}
++
++// The RDP's dithered 16-bit colour write: a channel rounds up to the next
++// 5-bit step when its low 3 bits exceed the dither value (0-7), clamped at 31,
++// else keeps its top 5 bits. (c + 7 - d) >> 3 carries into the top 5 bits
++// exactly when (c & 7) > d.
++int3 ReduceToRGB5(float3 color, uint dither) {
++    const uint3 channel8 = uint3(round(saturate(color) * 255.0f));
++    return int3(min((channel8 + 7u - dither) >> 3, 31u));
++}
++
++// A framebuffer pixel as the VI reads it, in 8-bit channels, from the rendered
++// frame's texel at the pixel's centre (the same pixel at 1x). A 16-bit
++// framebuffer's 5-bit channels read with the low 3 bits clear. Pixels outside
++// the framebuffer repeat its edge.
++int3 ViFetchPixel(int2 pixel) {
++    const int2 framebufferSize = int2(gConstants.framebufferWidth, gConstants.framebufferHeight);
++    pixel = clamp(pixel, int2(0, 0), framebufferSize - 1);
++    const float2 texelsPerPixel = gConstants.videoResolution / float2(framebufferSize);
++    const int2 lastTexel = int2(gConstants.textureResolution) - 1;
++    const int2 texel = min(int2((float2(pixel) + 0.5f) * texelsPerPixel), lastTexel);
++    const float3 color = gInput.Load(int3(texel, 0)).rgb;
++    if (gConstants.colourReduction != 0) {
++        return ReduceToRGB5(color, ViDitherValue(pixel)) << 3;
++    }
++
++    return int3(round(saturate(color) * 255.0f));
++}
++
++// Coverage as the RDP stores it (covered sub-samples minus one). Without a
++// coverage estimate, and in AA modes 2 and 3, every pixel is fully covered.
++static const uint ViFullCoverage = 7;
++
++uint ViFetchCoverage(int2 pixel) {
++    if ((gConstants.coverageInput == 0) || (gConstants.viAntiAliasing == 0)) {
++        return ViFullCoverage;
++    }
++
++    const int2 framebufferSize = int2(gConstants.framebufferWidth, gConstants.framebufferHeight);
++    pixel = clamp(pixel, int2(0, 0), framebufferSize - 1);
++    const float2 texelsPerPixel = gConstants.videoResolution / float2(framebufferSize);
++    const int2 lastTexel = int2(gConstants.textureResolution) - 1;
++    const int2 texel = min(int2((float2(pixel) + 0.5f) * texelsPerPixel), lastTexel);
++    return uint(round(saturate(gInput.Load(int3(texel, 0)).a) * EstimateCoverageScale));
++}
++
++// The fully covered neighbours VI anti-aliasing reconstructs the background
++// from.
++static const int ViAntiAliasNeighbourCount = 6;
++static const int2 ViAntiAliasNeighbours[ViAntiAliasNeighbourCount] = { int2(-1, -1), int2(1, -1), int2(-2, 0), int2(2, 0), int2(-1, 1), int2(1, 1) };
++
++// VI anti-aliasing of a partially covered pixel (n64_video/vi_anti_aliasing.hpp):
++// per channel, the penultimate maximum and minimum of the centre (counted
++// twice) and the fully covered neighbours stand for the background, and the
++// pixel moves toward it by its missing coverage.
++int3 ViAntiAliasedPixel(int2 pixel, int3 centre, uint coverage) {
++    int3 largest = centre;
++    int3 secondLargest = centre;
++    int3 smallest = centre;
++    int3 secondSmallest = centre;
++    [unroll] for (int i = 0; i < ViAntiAliasNeighbourCount; i++) {
++        const int2 neighbour = pixel + ViAntiAliasNeighbours[i];
++        if (ViFetchCoverage(neighbour) == ViFullCoverage) {
++            const int3 value = ViFetchPixel(neighbour);
++            secondLargest = select(value > largest, largest, max(secondLargest, value));
++            largest = max(largest, value);
++            secondSmallest = select(value < smallest, smallest, min(secondSmallest, value));
++            smallest = min(smallest, value);
++        }
++    }
++
++    const int3 backgroundOffset = secondSmallest + secondLargest - 2 * centre;
++    // The pixel moves by its missing sub-samples (7 - coverage) out of the 8
++    // coverage sub-samples: + 4 rounds the divide, >> 3 divides by 8.
++    return centre + ((backgroundOffset * int(ViFullCoverage - coverage) + 4) >> 3);
++}
++
++// A partially covered pixel is anti-aliased. A fully covered one goes through
++// the VI's dither filter, which restores some of the low bits a 16-bit
++// framebuffer dropped: each channel moves one step toward each of the 8
++// neighbours whose top 5 bits differ from its own. It does the same on a
++// 32-bit framebuffer.
++int3 ViFilteredPixel(int2 pixel) {
++    const int3 centre = ViFetchPixel(pixel);
++    const uint coverage = ViFetchCoverage(pixel);
++    if (coverage < ViFullCoverage) {
++        return ViAntiAliasedPixel(pixel, centre, coverage);
++    }
++
++    const int3 centre5 = centre >> 3;
++    int3 color = centre;
++    if (gConstants.ditherFilter != 0) {
++        [unroll] for (int dy = -1; dy <= 1; dy++) {
++            [unroll] for (int dx = -1; dx <= 1; dx++) {
++                if ((dx != 0) || (dy != 0)) {
++                    color += sign((ViFetchPixel(pixel + int2(dx, dy)) >> 3) - centre5);
++                }
++            }
++        }
++    }
++
++    return color;
++}
++
++// The divot filter: where the pixel or its left or right neighbour is
++// partially covered, each channel becomes the median of the three filtered
++// pixels.
++int3 ViDivotPixel(int2 pixel) {
++    const int3 centre = ViFilteredPixel(pixel);
++    if ((gConstants.coverageInput == 0) || (gConstants.divot == 0)) {
++        return centre;
++    }
++
++    const int2 left = pixel + int2(-1, 0);
++    const int2 right = pixel + int2(1, 0);
++    if ((ViFetchCoverage(left) & ViFetchCoverage(pixel) & ViFetchCoverage(right)) == ViFullCoverage) {
++        return centre;
++    }
++
++    const int3 leftColor = ViFilteredPixel(left);
++    const int3 rightColor = ViFilteredPixel(right);
++    return max(min(leftColor, centre), min(max(leftColor, centre), rightColor));
++}
++
++// Gamma-dither noise (n64_video/gamma_dither.hpp): lowbias32 chained through
++// the frame counter, the row and the sample gives three independent bits,
++// red, green and blue; each adds to its 8-bit channel, which stays at most
++// 255.
++uint ViGammaDitherHash(uint value) {
++    value ^= value >> 16;
++    value *= 0x7FEB352Du;
++    value ^= value >> 15;
++    value *= 0x846CA68Bu;
++    value ^= value >> 16;
++    return value;
++}
++
++int3 ViGammaDither(uint2 outputPixel, int3 color) {
++    const uint bits = ViGammaDitherHash(outputPixel.x + ViGammaDitherHash(outputPixel.y + ViGammaDitherHash(gConstants.noiseFrame)));
++    const int3 noise = int3(bits & 1u, (bits >> 1) & 1u, (bits >> 2) & 1u);
++    return min(color + noise, 255);
++}
++
++float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET {
++    // The sample's position in framebuffer pixels, 2.10 fixed point. The VI
++    // interpolates with the top 5 bits of the fraction.
++    const uint2 outputPixel = uint2(pos.xy);
++    const uint position = gConstants.xOffset + outputPixel.x * gConstants.xStep;
++    const int2 pixel = int2(position >> 10, outputPixel.y);
++    int3 color = ViDivotPixel(pixel);
++    if (gConstants.resampling == 0) {
++        const int fraction = int((position >> 5) & 31);
++        const int3 next = ViDivotPixel(pixel + int2(1, 0));
++        color += ((next - color) * fraction + 16) >> 5;
++    }
++
++    if (gConstants.gammaDither != 0) {
++        color = ViGammaDither(outputPixel, color);
++    }
++
++    return float4(float3(color) / 255.0f, 1.0f);
++}
++#elif defined(VI_CRT)
++// CRT filter: the final VI draw under a CRT preset, in place of the
++// pixel-scaling filter. It reads the pre-pass output and fills the viewport,
++// the same picture rectangle as the other variants; VI gamma is the signal's
++// last stage.
++#include "CrtFilter.hlsli"
++
++float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET {
++    const float2 outputSize = float2(gConstants.crtOutputWidth, gConstants.crtOutputHeight);
++    const int2 sourceSize = int2(gConstants.videoResolution);
++    return CrtFilter(gInput, sourceSize, uv * outputSize, outputSize, gConstants.crtPreset, gConstants.crtCurvature != 0, gConstants.gamma);
++}
++#else
+ float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET {
+ #ifdef PIXEL_ANTIALIASING
+     return PixelAntialiasing(uv);
+ #else
+     return SampleInput((uv / gConstants.textureResolution) * gConstants.videoResolution);
+ #endif
+-}
+\ No newline at end of file
++}
++#endif // VI_PREPASS
+diff --git a/src/shaders/crt_filter.h b/src/shaders/crt_filter.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..0225da4042266013e37a8e436f69433be2de3ec6
+--- /dev/null
++++ b/src/shaders/crt_filter.h
+@@ -0,0 +1,365 @@
++//
++// Video core CRT filter: the CRT preset table and the per-channel arithmetic
++// of the CRT pass, shared by the CRT shader include (CrtFilter.hlsli) and its
++// C++ tests. C++ includes this file directly; the video core's RT64 patch
++// copies it next to CrtFilter.hlsli for the shaders. It is written in the
++// subset C++ and HLSL have in common; __HLSL_VERSION (defined by DXC) tells
++// them apart. Nothing here knows RT64 or the N64.
++//
++// The look follows Timothy Lottes' public-domain CRT shader: each output pixel
++// mixes the three nearest scanlines with Gaussian beam weights and each
++// scanline is a horizontal Gaussian of its source pixels, in linear light,
++// then a phosphor mask. The code is our own (ADR 0004: no GPL shader code).
++//
++
++#pragma once
++
++#ifdef __HLSL_VERSION
++#define CRT_FILTER_CONSTANT static const
++#define CRT_FILTER_FUNCTION
++#else
++#include <cmath>
++namespace n64_video::crt {
++using uint = unsigned;
++using std::abs;
++using std::exp2;
++using std::pow;
++using std::sqrt;
++#define CRT_FILTER_CONSTANT inline constexpr
++#define CRT_FILTER_FUNCTION inline
++#endif
++
++// CRT preset ids, the index into CrtPresets. Off doesn't run the CRT pass.
++CRT_FILTER_CONSTANT uint CrtPresetOff = 0;
++CRT_FILTER_CONSTANT uint CrtPresetRgbMonitor = 1;
++CRT_FILTER_CONSTANT uint CrtPresetCompositeTv = 2;
++CRT_FILTER_CONSTANT uint CrtPresetSvideoTv = 3;
++CRT_FILTER_CONSTANT uint CrtPresetCount = 4;
++
++// Phosphor mask types.
++// Aperture grille: vertical RGB stripes, one triad per three output columns.
++CRT_FILTER_CONSTANT uint CrtMaskApertureGrille = 0;
++CRT_FILTER_CONSTANT uint CrtMaskTriadColumns = 3;
++// Slot mask: the same triads, cut into slots by one dark row in every
++// CrtSlotRows, with alternate triads' slots offset by half that.
++CRT_FILTER_CONSTANT uint CrtMaskSlot = 1;
++CRT_FILTER_CONSTANT uint CrtSlotRows = 4;
++
++struct CrtPresetParams {
++    // Scanline beam: weight exp2(scanlineHardness * d * d) at d scanlines from
++    // the line's centre (Lottes' hardScan). More negative is a thinner beam.
++    float scanlineHardness;
++    // Horizontal beam: weight exp2(pixelHardness * d * d) at d source pixels
++    // (Lottes' hardPix). More negative is sharper.
++    float pixelHardness;
++    // Mask: a lit channel is multiplied by maskLight, the others by maskDark.
++    uint maskType;
++    float maskDark;
++    float maskLight;
++    // Makes up the light scanlines and mask take away, before clipping at 1.
++    float brightnessBoost;
++    // Decodes the signal to linear light as the tube does.
++    float crtGamma;
++    // The video connection's blur of the signal, before the decode: luma and
++    // chroma are each filtered along the row with a Gaussian this wide (full
++    // width at half maximum, in source pixels; 0 is no blur), and chroma is
++    // moved this many source pixels to the right.
++    float lumaWidth;
++    float chromaWidth;
++    float chromaShift;
++    // Screen curvature (Lottes' warp): how far the picture bends along x and
++    // along y towards the edges. 0 is a flat axis.
++    float curvatureX;
++    float curvatureY;
++};
++
++// Starting constants; the developer tunes them by eye. RGB monitor starts
++// from Lottes' defaults (hardScan -8, hardPix -3, mask 0.5 / 1.5) with his
++// shadow mask swapped for an aperture grille, and a boost that keeps full
++// white at about 70 % of its unfiltered brightness. The TV presets share
++// faint scanlines (about 15 % darker between lines than on them) and a slot
++// mask weaker than the grille, with a boost that keeps full white at about
++// 73 %; they differ in the signal blur. Curvature starts from Lottes' warp;
++// RGB monitor is a cylindrical tube, curved horizontally only.
++CRT_FILTER_CONSTANT CrtPresetParams CrtPresets[CrtPresetCount] = {
++    // Off: unused, the CRT pass doesn't run.
++    { 0.0f, 0.0f, CrtMaskApertureGrille, 1.0f, 1.0f, 1.0f, 2.4f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f },
++    // RGB monitor: crisp, pronounced scanlines, aperture grille. An RGB
++    // connection doesn't blur the signal.
++    { -8.0f, -3.0f, CrtMaskApertureGrille, 0.5f, 1.5f, 1.6f, 2.4f, 0.0f, 0.0f, 0.0f, 1.0f / 48.0f, 0.0f },
++    // Composite TV: soft luma, wide chroma moved a little to the right, which
++    // gives the colour bleed; faint scanlines.
++    { -4.5f, -3.0f, CrtMaskSlot, 0.75f, 1.25f, 0.85f, 2.4f, 1.6f, 4.0f, 0.3f, 1.0f / 32.0f, 1.0f / 24.0f },
++    // S-Video TV: luma and chroma on separate wires, so only slight luma blur
++    // and moderate chroma blur, without a shift; faint scanlines.
++    { -4.5f, -3.0f, CrtMaskSlot, 0.75f, 1.25f, 0.85f, 2.4f, 0.8f, 2.5f, 0.0f, 1.0f / 32.0f, 1.0f / 24.0f },
++};
++
++// Above this many framebuffer rows the frame is interlaced and each scanline
++// shows a pair of rows (no interlace flicker).
++CRT_FILTER_CONSTANT uint CrtMaxProgressiveRows = 288;
++
++// Each output pixel mixes the scanline it lies on and its two neighbours, so
++// a scanline reaches 1.5 scanlines from its centre.
++CRT_FILTER_CONSTANT float CrtScanlineReach = 1.5f;
++
++CRT_FILTER_FUNCTION uint CrtRowsPerScanline(uint sourceRows) {
++    return (sourceRows > CrtMaxProgressiveRows) ? 2 : 1;
++}
++
++CRT_FILTER_FUNCTION uint CrtScanlineCount(uint sourceRows) {
++    return sourceRows / CrtRowsPerScanline(sourceRows);
++}
++
++// Where an output position (pixel centre, in pixels from the picture's top)
++// lies, in scanlines from the picture's top.
++CRT_FILTER_FUNCTION float CrtScanlinePosition(float outputY, float outputHeight, uint scanlineCount) {
++    return outputY / outputHeight * float(scanlineCount);
++}
++
++CRT_FILTER_FUNCTION float CrtGaussian(float distance, float hardness) {
++    return exp2(hardness * distance * distance);
++}
++
++// The beam weight of a scanline `distance` scanlines away.
++CRT_FILTER_FUNCTION float CrtScanlineWeight(float distance, uint preset) {
++    return CrtGaussian(distance, CrtPresets[preset].scanlineHardness);
++}
++
++// The weight of a source pixel `distance` source pixels away, before the
++// row's taps are normalised.
++CRT_FILTER_FUNCTION float CrtPixelWeight(float distance, uint preset) {
++    return CrtGaussian(distance, CrtPresets[preset].pixelHardness);
++}
++
++// Whether an output pixel lies in a slot mask's dark row.
++CRT_FILTER_FUNCTION bool CrtSlotGap(uint column, uint row) {
++    const uint triad = column / CrtMaskTriadColumns;
++    const uint slotOffset = (triad % 2) * (CrtSlotRows / 2);
++    return ((row + slotOffset) % CrtSlotRows) == (CrtSlotRows - 1);
++}
++
++// The mask's factor for one channel (0 red, 1 green, 2 blue) of an output
++// pixel. Aligned to whole output pixels, so it can't beat with the pixel grid.
++CRT_FILTER_FUNCTION float CrtMaskAt(uint column, uint row, uint channel, uint preset) {
++    const bool inGap = (CrtPresets[preset].maskType == CrtMaskSlot) && CrtSlotGap(column, row);
++    const bool lit = !inGap && ((column % CrtMaskTriadColumns) == channel);
++    return lit ? CrtPresets[preset].maskLight : CrtPresets[preset].maskDark;
++}
++
++// The mask's factor in an output pixel column's first row; the aperture
++// grille is the same in every row.
++CRT_FILTER_FUNCTION float CrtMask(uint column, uint channel, uint preset) {
++    return CrtMaskAt(column, 0, channel, preset);
++}
++
++CRT_FILTER_FUNCTION float CrtDecode(float signal, uint preset) {
++    return pow(signal, CrtPresets[preset].crtGamma);
++}
++
++CRT_FILTER_FUNCTION float CrtClamp01(float value) {
++    return (value < 0.0f) ? 0.0f : ((value > 1.0f) ? 1.0f : value);
++}
++
++// One channel of an output pixel in linear light: the scanline it lies on
++// (`centre`) and the ones above and below, each already filtered along its
++// row, mixed by beam weight, boosted, masked and clipped. `distance` is the
++// pixel's offset from the centre scanline, in scanlines (-0.5 to 0.5);
++// `column` and `row` are the output pixel's, for the mask.
++CRT_FILTER_FUNCTION float CrtChannelAt(float above, float centre, float below, float distance, uint column, uint row, uint channel, uint preset) {
++    const float beam =
++        above * CrtScanlineWeight(distance + 1.0f, preset) +
++        centre * CrtScanlineWeight(distance, preset) +
++        below * CrtScanlineWeight(distance - 1.0f, preset);
++    return CrtClamp01(beam * CrtPresets[preset].brightnessBoost * CrtMaskAt(column, row, channel, preset));
++}
++
++// CrtChannelAt in an output pixel column's first row; enough for the
++// aperture grille, which is the same in every row.
++CRT_FILTER_FUNCTION float CrtChannel(float above, float centre, float below, float distance, uint column, uint channel, uint preset) {
++    return CrtChannelAt(above, centre, below, distance, column, 0, channel, preset);
++}
++
++// The signal blur reads this many source pixels on each side of the one it
++// filters; sized for the widest kernel, Composite TV's chroma.
++CRT_FILTER_CONSTANT int CrtSignalKernelRadius = 5;
++CRT_FILTER_CONSTANT uint CrtSignalKernelTaps = 2 * CrtSignalKernelRadius + 1;
++
++// The signal blur's weights for the source pixels CrtSignalKernelRadius to
++// the left (index 0) through as many to the right of the filtered one, each
++// kernel summing to 1.
++struct CrtSignalKernels {
++    float luma[CrtSignalKernelTaps];
++    float chroma[CrtSignalKernelTaps];
++};
++
++// A Gaussian `width` wide at half maximum; width 0 passes only distance 0.
++CRT_FILTER_FUNCTION float CrtSignalWeight(float distance, float width) {
++    if (width <= 0.0f) {
++        return (distance == 0.0f) ? 1.0f : 0.0f;
++    }
++    // exp2(-4 d^2 / w^2) is 1/2 at d = w / 2.
++    return exp2(-4.0f * distance * distance / (width * width));
++}
++
++CRT_FILTER_FUNCTION CrtSignalKernels CrtMakeSignalKernels(uint preset) {
++    CrtSignalKernels kernels;
++    float lumaTotal = 0.0f;
++    float chromaTotal = 0.0f;
++    for (uint tap = 0; tap < CrtSignalKernelTaps; tap++) {
++        const float offset = float(int(tap) - CrtSignalKernelRadius);
++        kernels.luma[tap] = CrtSignalWeight(offset, CrtPresets[preset].lumaWidth);
++        // Chroma moved right by the shift is read from that far to the left.
++        kernels.chroma[tap] = CrtSignalWeight(offset + CrtPresets[preset].chromaShift, CrtPresets[preset].chromaWidth);
++        lumaTotal += kernels.luma[tap];
++        chromaTotal += kernels.chroma[tap];
++    }
++    for (uint tap = 0; tap < CrtSignalKernelTaps; tap++) {
++        kernels.luma[tap] /= lumaTotal;
++        kernels.chroma[tap] /= chromaTotal;
++    }
++    return kernels;
++}
++
++// A colour as three numbers: RGB, or YIQ (x luma, y and z chroma).
++struct CrtTriple {
++    float x;
++    float y;
++    float z;
++};
++
++CRT_FILTER_FUNCTION CrtTriple CrtMakeTriple(float x, float y, float z) {
++    CrtTriple triple = { x, y, z };
++    return triple;
++}
++
++// NTSC's YIQ (FCC), in which a TV carries luma and chroma separately. The
++// inverse is exact to the precision shown, so a round trip is the identity.
++CRT_FILTER_FUNCTION CrtTriple CrtRgbToYiq(CrtTriple rgb) {
++    return CrtMakeTriple(
++        0.299f * rgb.x + 0.587f * rgb.y + 0.114f * rgb.z,
++        0.595716f * rgb.x - 0.274453f * rgb.y - 0.321263f * rgb.z,
++        0.211456f * rgb.x - 0.522591f * rgb.y + 0.311135f * rgb.z);
++}
++
++CRT_FILTER_FUNCTION CrtTriple CrtYiqToRgb(CrtTriple yiq) {
++    return CrtMakeTriple(
++        yiq.x + 0.956296f * yiq.y + 0.621024f * yiq.z,
++        yiq.x - 0.272122f * yiq.y - 0.647381f * yiq.z,
++        yiq.x - 1.106989f * yiq.y + 1.704615f * yiq.z);
++}
++
++// Source pixels on each side of the nearest one that a scanline's horizontal
++// beam reads.
++CRT_FILTER_CONSTANT int CrtRowTapRadius = 2;
++
++// The source pixels of a row the CRT pass reads per scanline: the beam's taps
++// and the signal blur's reach around each of them.
++CRT_FILTER_CONSTANT uint CrtSignalWindowTaps = 2 * (CrtRowTapRadius + CrtSignalKernelRadius) + 1;
++
++// The signal of window[centre] after the video connection's blur: luma and
++// chroma filtered apart in YIQ, then back to RGB and clipped to the signal
++// range. `centre` must be at least CrtSignalKernelRadius from both ends.
++CRT_FILTER_FUNCTION CrtTriple CrtBlurSignal(CrtTriple window[CrtSignalWindowTaps], int centre, CrtSignalKernels kernels) {
++    CrtTriple yiq = CrtMakeTriple(0.0f, 0.0f, 0.0f);
++    for (uint tap = 0; tap < CrtSignalKernelTaps; tap++) {
++        const CrtTriple sample = CrtRgbToYiq(window[centre - CrtSignalKernelRadius + int(tap)]);
++        yiq.x += kernels.luma[tap] * sample.x;
++        yiq.y += kernels.chroma[tap] * sample.y;
++        yiq.z += kernels.chroma[tap] * sample.z;
++    }
++    const CrtTriple rgb = CrtYiqToRgb(yiq);
++    return CrtMakeTriple(CrtClamp01(rgb.x), CrtClamp01(rgb.y), CrtClamp01(rgb.z));
++}
++
++// Linear light to the sRGB signal a UNORM swapchain shows.
++CRT_FILTER_FUNCTION float CrtEncodeSrgb(float light) {
++    return (light <= 0.0031308f) ? (light * 12.92f) : (1.055f * pow(light, 1.0f / 2.4f) - 0.055f);
++}
++
++// Screen curvature: the picture bends like a CRT tube's glass, darkens
++// towards its corners (vignette) and has rounded corners. The warp maps an
++// output position to the picture position the CRT pass samples there; the
++// mask is not warped. Positions are in output pixels from the picture
++// rectangle's top-left corner.
++
++// Vignette: light left at the picture's corners is 1 - CrtVignetteStrength.
++CRT_FILTER_CONSTANT float CrtVignetteStrength = 0.3f;
++// Corner radius, as a fraction of the picture rectangle's shorter side.
++CRT_FILTER_CONSTANT float CrtCornerRadius = 0.04f;
++
++CRT_FILTER_FUNCTION float CrtMin(float a, float b) {
++    return (a < b) ? a : b;
++}
++
++CRT_FILTER_FUNCTION float CrtMax(float a, float b) {
++    return (a > b) ? a : b;
++}
++
++// A position from -1 (left or top edge) to 1 (right or bottom edge), and back.
++CRT_FILTER_FUNCTION float CrtCentred(float position, float size) {
++    return position / size * 2.0f - 1.0f;
++}
++
++CRT_FILTER_FUNCTION float CrtUncentred(float centred, float size) {
++    return (centred + 1.0f) * 0.5f * size;
++}
++
++// Lottes' warp along one axis, in centred positions: the further the
++// position lies along the other axis, the further it is pushed out.
++CRT_FILTER_FUNCTION float CrtWarpAxis(float along, float across, float curvature) {
++    return along * (1.0f + across * across * curvature);
++}
++
++// Picture fit: the scale on a warped axis that puts the curved picture inside
++// the rectangle, edge midpoints on its edge and corners pulled inward, with
++// nothing cropped. Other picture fits would scale here too.
++CRT_FILTER_FUNCTION float CrtCurvatureFitScale(float curvature) {
++    return 1.0f / CrtWarpAxis(1.0f, 0.0f, curvature);
++}
++
++CRT_FILTER_FUNCTION float CrtCurvedAxis(float along, float across, float alongSize, float acrossSize, float curvature) {
++    const float centred = CrtWarpAxis(CrtCentred(along, alongSize), CrtCentred(across, acrossSize), curvature);
++    return CrtUncentred(centred * CrtCurvatureFitScale(curvature), alongSize);
++}
++
++// The picture position the CRT pass samples at output position (x, y); the
++// output position itself when curvature is off.
++CRT_FILTER_FUNCTION float CrtCurvedX(float x, float y, float width, float height, uint preset, bool curvature) {
++    return curvature ? CrtCurvedAxis(x, y, width, height, CrtPresets[preset].curvatureX) : x;
++}
++
++CRT_FILTER_FUNCTION float CrtCurvedY(float x, float y, float width, float height, uint preset, bool curvature) {
++    return curvature ? CrtCurvedAxis(y, x, height, width, CrtPresets[preset].curvatureY) : y;
++}
++
++// The vignette's factor on the light at picture position (x, y): 1 at the
++// centre, falling off with the squared distance from it.
++CRT_FILTER_FUNCTION float CrtVignette(float x, float y, float width, float height) {
++    const float centredX = CrtCentred(x, width);
++    const float centredY = CrtCentred(y, height);
++    const float distanceSquared = (centredX * centredX + centredY * centredY) * 0.5f;
++    return CrtMax(1.0f - CrtVignetteStrength * distanceSquared, 0.0f);
++}
++
++// How much of the output pixel at picture position (x, y) the picture covers:
++// 1 inside, 0 outside the rectangle with rounded corners, anti-aliased over
++// about one output pixel. Picture positions are close enough to output pixels
++// near the edge for the border's width.
++CRT_FILTER_FUNCTION float CrtPictureCoverage(float x, float y, float width, float height) {
++    const float radius = CrtCornerRadius * CrtMin(width, height);
++    // Signed distance to the rounded rectangle, negative inside.
++    const float cornerX = abs(x - width * 0.5f) - (width * 0.5f - radius);
++    const float cornerY = abs(y - height * 0.5f) - (height * 0.5f - radius);
++    const float outsideX = CrtMax(cornerX, 0.0f);
++    const float outsideY = CrtMax(cornerY, 0.0f);
++    const float distance = sqrt(outsideX * outsideX + outsideY * outsideY) + CrtMin(CrtMax(cornerX, cornerY), 0.0f) - radius;
++    return CrtClamp01(0.5f - distance);
++}
++
++#ifndef __HLSL_VERSION
++} // namespace n64_video::crt
++#endif
++
++#undef CRT_FILTER_CONSTANT
++#undef CRT_FILTER_FUNCTION
+diff --git a/src/shared/rt64_coverage_estimate_params.h b/src/shared/rt64_coverage_estimate_params.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..195720a40694d33bf35e09711818459c1b432286
+--- /dev/null
++++ b/src/shared/rt64_coverage_estimate_params.h
+@@ -0,0 +1,35 @@
++//
++// Video core coverage estimate: push constants of CoverageEstimateCS.
++// The coverage patch copies this file to RT64's src/shared/.
++//
++
++#pragma once
++
++#include "shared/rt64_hlsl.h"
++
++#ifdef HLSL_CPU
++namespace interop {
++#endif
++    struct CoverageEstimateCB {
++        // Size of the colour target, one rendered pixel per RDP pixel.
++        uint2 resolution;
++        uint sampleCount;
++        // Bit 2s: sample s of an RDP pixel lies in the rendered pixel to the
++        // right; bit 2s + 1: in the one below (n64_video::sample_pixel_offset_bits).
++        uint samplePixelOffsets;
++        // Samples that lie in the RDP pixel's own rendered pixel.
++        uint ownPixelMask;
++        // 1: find the front surface from depth and store it. 0: reuse the
++        // stored front surface (a pair without a depth target).
++        uint useDepth;
++        // With useDepth 0: 1 when the stored front surface is from this frame,
++        // else every sample counts as front.
++        uint storedFrontValid;
++        // The colour target's alpha range: 255, or 65535 with HDR.
++        float alphaRange;
++        float depthToleranceFactor;
++        float minimumDepthTolerance;
++    };
++#ifdef HLSL_CPU
++};
++#endif
+diff --git a/src/shared/rt64_coverage_layout.h b/src/shared/rt64_coverage_layout.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..e18d235bd4773f0ec0a6e5db5f2d8aef4f9cf52c
+--- /dev/null
++++ b/src/shared/rt64_coverage_layout.h
+@@ -0,0 +1,69 @@
++//
++// Video core coverage estimate: the values the core's reference
++// (coverage_estimate.hpp) and the coverage patch's shaders share, defined
++// once. C++ includes this file directly; the coverage patch copies it to
++// RT64's src/shared/rt64_coverage_layout.h for the shaders. It is written in
++// the subset C++ and HLSL have in common; __HLSL_VERSION (defined by DXC)
++// tells them apart.
++//
++
++#pragma once
++
++#ifdef __HLSL_VERSION
++#define N64_VIDEO_LAYOUT_CONSTANT static const
++#define N64_VIDEO_LAYOUT_FUNCTION
++#else
++namespace n64_video::coverage_layout {
++using uint = unsigned;
++#define N64_VIDEO_LAYOUT_CONSTANT inline constexpr
++#define N64_VIDEO_LAYOUT_FUNCTION inline constexpr
++#endif
++
++// RT64 keeps its own coverage value in the colour target's alpha, in units of
++// the alpha (1/255, or 1/65535 with HDR). It writes bit 2 of the low 3 bits
++// back to RDRAM as a 16-bit pixel's coverage bit, after averaging a pixel's
++// samples.
++N64_VIDEO_LAYOUT_CONSTANT uint Rt64CoverageBits = 3;
++// RT64's value for a fully covered sample: CVG_DST_FULL, or CVG_DST_CLAMP
++// without CVG_X_ALPHA.
++N64_VIDEO_LAYOUT_CONSTANT uint Rt64FullSampleValue = (1U << Rt64CoverageBits) - 1;
++
++// The per-sample record: an anti-aliased draw adds this marker to RT64's
++// value in the samples it covers. RT64's own values stay far below it (they
++// pass 127 only after 16 full-coverage CVG_DST_WRAP draws on one sample), so
++// the marker can be taken off again exactly: per sample before RT64 averages
++// a pixel (the coverage patch's raster resolve), and by the estimate.
++N64_VIDEO_LAYOUT_CONSTANT uint PartialRecordMarker = 128;
++
++// A sample covers 8 eighths of itself; with CVG_X_ALPHA, round(8 * alpha).
++N64_VIDEO_LAYOUT_CONSTANT uint SampleFullEighths = 8;
++
++// The estimate texture (RGBA8) stores the RDP coverage (0-7) in its alpha as
++// coverage / EstimateCoverageScale.
++N64_VIDEO_LAYOUT_CONSTANT float EstimateCoverageScale = 255.0f;
++
++// Whether a stored alpha value carries the partial record. `fullValue` is the
++// alpha range (255 or 65535): a full alpha comes from a clear or an RDRAM load
++// and carries no record.
++N64_VIDEO_LAYOUT_FUNCTION bool IsPartialRecord(uint value, uint fullValue) {
++    return (value >= PartialRecordMarker) && (value < 2U * PartialRecordMarker) && (value != fullValue);
++}
++
++// RT64's own coverage value of a stored alpha value, without the record.
++N64_VIDEO_LAYOUT_FUNCTION uint Rt64CoverageValue(uint value, uint fullValue) {
++    return IsPartialRecord(value, fullValue) ? (value - PartialRecordMarker) : value;
++}
++
++// The eighths of the sample its front draw covered, from RT64's value. 0
++// (nothing drawn: a clear or an RDRAM load) and RT64's full value or more
++// (CVG_DST_WRAP adds) count as the whole sample.
++N64_VIDEO_LAYOUT_FUNCTION uint SampleEighths(uint rt64Value) {
++    return ((rt64Value == 0U) || (rt64Value >= Rt64FullSampleValue)) ? SampleFullEighths : rt64Value;
++}
++
++#ifndef __HLSL_VERSION
++} // namespace n64_video::coverage_layout
++#endif
++
++#undef N64_VIDEO_LAYOUT_CONSTANT
++#undef N64_VIDEO_LAYOUT_FUNCTION
+diff --git a/src/shared/rt64_frame_params.h b/src/shared/rt64_frame_params.h
+index 2d955dbda640ae4f28105f3ec5a376ffe57d205e..ea52123e4aea72979e68bdd49b28bb7bd05a53eb 100644
+--- a/src/shared/rt64_frame_params.h
++++ b/src/shared/rt64_frame_params.h
+@@ -13,6 +13,9 @@ namespace interop {
+         uint frameCount;
+         uint viewUbershaders;
+         float ditherNoiseStrength;
++        // Video core coverage estimate: 1 makes the raster shader mark the
++        // samples of anti-aliased draws in the colour target's alpha.
++        uint coverageRecord;
+     };
+ #ifdef HLSL_CPU
+ };
+diff --git a/src/shared/rt64_texture_copy.h b/src/shared/rt64_texture_copy.h
+index 947256a88a31bf0de53b8b364d704e1a6f8da37c..257db07030a7b651de063e3ec6ca88bfbff27eda 100644
+--- a/src/shared/rt64_texture_copy.h
++++ b/src/shared/rt64_texture_copy.h
+@@ -12,6 +12,10 @@ namespace interop {
+     struct TextureCopyCB {
+         float2 uvScroll;
+         float2 uvScale;
++        // Video core coverage estimate: the colour target's alpha range (255,
++        // or 65535 with HDR) when its samples carry the record, which a
++        // resolve takes off; else 0.
++        float coverageRecordAlphaRange;
+     };
+ #ifdef HLSL_CPU
+ };
+diff --git a/src/shared/rt64_video_interface.h b/src/shared/rt64_video_interface.h
+index 48d87da68f6c17c114c598e88100db0432298985..be36b67d1af573b99d8c13dbc89f71b054549f01 100644
+--- a/src/shared/rt64_video_interface.h
++++ b/src/shared/rt64_video_interface.h
+@@ -13,6 +13,33 @@ namespace interop {
+         float2 videoResolution;
+         float2 textureResolution;
+         float gamma;
++        // VI pre-pass: 16-bit colour reduction (0 or 1), RDP colour-dither
++        // pattern (0 magic square, 1 Bayer), VI dither filter (0 or 1),
++        // resampling (0 interpolate, 1 replicate), X step and offset (2.10
++        // fixed point) and the framebuffer size. With a coverage estimate the
++        // input holds the front colour and coverage (coverageInput 1), with VI
++        // anti-aliasing of partially covered pixels (AA modes 0 and 1) and the
++        // divot filter (0 or 1). Gamma-dither noise (0 or 1) uses the
++        // pre-pass's frame counter.
++        uint colourReduction;
++        uint ditherPattern;
++        uint ditherFilter;
++        uint resampling;
++        uint xStep;
++        uint xOffset;
++        uint framebufferWidth;
++        uint framebufferHeight;
++        uint coverageInput;
++        uint viAntiAliasing;
++        uint divot;
++        uint gammaDither;
++        uint noiseFrame;
++        // CRT filter (final VI draw): the CRT preset id (0 off), the picture
++        // rectangle's size in output pixels and screen curvature (0 or 1).
++        uint crtPreset;
++        float crtOutputWidth;
++        float crtOutputHeight;
++        uint crtCurvature;
+     };
+ #ifdef HLSL_CPU
+ };
