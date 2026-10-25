@@ -9,8 +9,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 import logging
+import re
+import socket
 from pathlib import Path
 import subprocess
+import tempfile
 import time
 
 LOG = logging.getLogger("sccache_launcher")
@@ -74,9 +77,15 @@ CACHE_SIZE = "20G"
 CACHE_SIZE_BYTES = 20 * 1024 ** 3
 
 
-def sccache_environment(local_app_data: Path) -> dict[str, str]:
-    r"""Return the variables that put sccache's cache under %LOCALAPPDATA%\JFG with its size cap."""
-    return {"SCCACHE_DIR": str(local_app_data / CACHE_FOLDER), "SCCACHE_CACHE_SIZE": CACHE_SIZE}
+def sccache_environment(local_app_data: Path, server_port: int | None = None) -> dict[str, str]:
+    r"""Return the variables that put sccache's cache under %LOCALAPPDATA%\JFG with its size cap.
+
+    With a server port, they also make sccache listen on it.
+    """
+    environment = {"SCCACHE_DIR": str(local_app_data / CACHE_FOLDER), "SCCACHE_CACHE_SIZE": CACHE_SIZE}
+    if server_port is not None:
+        environment[SERVER_PORT_VARIABLE] = str(server_port)
+    return environment
 
 
 @dataclass(frozen=True)
@@ -161,6 +170,136 @@ def server_settings_problem(document: dict, environment: dict[str, str]) -> str 
             "Run `sccache --stop-server` when no build is running, then build again.")
 
 
+@dataclass(frozen=True)
+class PortRange:
+    """A range of TCP ports, both ends included."""
+
+    first: int
+    last: int
+
+    def __contains__(self, port: int) -> bool:
+        return self.first <= port <= self.last
+
+
+# A range line of `netsh int ipv4 show excludedportrange`: start and end port, then `*` when administered.
+EXCLUDED_RANGE_LINE = re.compile(r"^\s*(\d+)\s+(\d+)\s*\*?\s*$", re.MULTILINE)
+
+
+def parse_excluded_port_ranges(netsh_output: str) -> list[PortRange]:
+    """Return the port ranges `netsh int ipv4 show excludedportrange protocol=tcp` lists."""
+    return [PortRange(int(first), int(last)) for first, last in EXCLUDED_RANGE_LINE.findall(netsh_output)]
+
+
+NETSH_EXCLUDED_PORTS_COMMAND = ["netsh", "int", "ipv4", "show", "excludedportrange", "protocol=tcp"]
+NETSH_TIMEOUT_SECONDS = 30
+
+
+def read_excluded_port_ranges() -> list[PortRange] | None:
+    """Return the TCP port ranges Windows excludes (Hyper-V/WSL reserve them), or None when netsh can't tell."""
+    try:
+        output = subprocess.run(NETSH_EXCLUDED_PORTS_COMMAND, stdin=subprocess.DEVNULL, capture_output=True,
+                                text=True, errors="replace", timeout=NETSH_TIMEOUT_SECONDS, check=True).stdout
+    except (OSError, subprocess.SubprocessError) as error:
+        LOG.warning("Can't read the Windows excluded port ranges with netsh: %s", error)
+        return None
+    ranges = parse_excluded_port_ranges(output)
+    LOG.debug("Windows excluded TCP port ranges: %s", ", ".join(describe_range(r) for r in ranges) or "none")
+    return ranges
+
+
+SERVER_PORT_VARIABLE = "SCCACHE_SERVER_PORT"
+DEFAULT_SERVER_PORT = 4226  # sccache's own default.
+# Tried in order when the default is excluded. Fixed, not random, so a server an earlier run started is reused.
+FALLBACK_SERVER_PORTS = (4400, 7226, 9226, 14226, 24226, 34226)
+
+
+@dataclass(frozen=True)
+class ServerPortChoice:
+    """The port the sccache server listens on and the line that says why."""
+
+    port: int
+    message: str
+    level: int
+
+
+def excluding_range(port: int, excluded: list[PortRange]) -> PortRange | None:
+    """Return the excluded range that covers a port, or None when none does."""
+    return next((port_range for port_range in excluded if port in port_range), None)
+
+
+def describe_range(port_range: PortRange) -> str:
+    """Return a port range as netsh lists it, e.g. 4158-4257."""
+    return f"{port_range.first}-{port_range.last}"
+
+
+def choose_server_port(*, configured: str | None, excluded: list[PortRange] | None) -> ServerPortChoice:
+    """Choose the sccache server port: the user's SCCACHE_SERVER_PORT, else the first port Windows doesn't exclude.
+
+    `excluded` is None when the excluded port ranges couldn't be read.
+    """
+    if configured:
+        return user_server_port(configured, excluded or [])
+    if excluded is None:
+        return ServerPortChoice(DEFAULT_SERVER_PORT, f"sccache: server port {DEFAULT_SERVER_PORT} (default); "
+                                "Windows port exclusions are unknown, so if the server can't start, set "
+                                f"{SERVER_PORT_VARIABLE} to a port outside them", logging.WARNING)
+    blocking = excluding_range(DEFAULT_SERVER_PORT, excluded)
+    if blocking is None:
+        return ServerPortChoice(DEFAULT_SERVER_PORT, f"sccache: server port {DEFAULT_SERVER_PORT} (default)",
+                                logging.INFO)
+    for port in FALLBACK_SERVER_PORTS:
+        if excluding_range(port, excluded) is None:
+            return ServerPortChoice(port, f"sccache: server port {port} (default {DEFAULT_SERVER_PORT} is in "
+                                    f"the Windows excluded port range {describe_range(blocking)})", logging.INFO)
+    return ServerPortChoice(DEFAULT_SERVER_PORT, f"sccache: server port {DEFAULT_SERVER_PORT} (default), although "
+                            "Windows excludes it and every fallback port; set "
+                            f"{SERVER_PORT_VARIABLE} to a port outside the excluded ranges", logging.WARNING)
+
+
+def user_server_port(configured: str, excluded: list[PortRange]) -> ServerPortChoice:
+    """Keep the port the user set, warning when Windows excludes it."""
+    try:
+        port = int(configured)
+    except ValueError as error:
+        raise ValueError(f"{SERVER_PORT_VARIABLE} must be a port number, not {configured!r}") from error
+    blocking = excluding_range(port, excluded)
+    if blocking is None:
+        return ServerPortChoice(port, f"sccache: server port {port} (set by {SERVER_PORT_VARIABLE})", logging.INFO)
+    return ServerPortChoice(port, f"sccache: server port {port} (set by {SERVER_PORT_VARIABLE}), although it is "
+                            f"in the Windows excluded port range {describe_range(blocking)}", logging.WARNING)
+
+
+def server_start_problem(exit_code: int, output: str, *, server_answers: bool, port: int) -> str | None:
+    """Return why the build can't compile through sccache after `sccache --start-server`, or None when it can.
+
+    A failed start is fine when a server answers: one was already running.
+    """
+    if exit_code == 0 or server_answers:
+        return None
+    cause_lines = [line.strip() for line in output.splitlines()
+                   if line.strip() and not line.startswith("sccache: Starting the server")]
+    cause = " ".join(cause_lines) or f"sccache --start-server failed with exit code {exit_code} and no output"
+    return (f"The sccache server could not start on port {port}: {cause} "
+            f"Build without it with --no-sccache, or set {SERVER_PORT_VARIABLE} to a free port "
+            "outside the ranges `netsh int ipv4 show excludedportrange protocol=tcp` lists.")
+
+
+SERVER_HOST = "127.0.0.1"
+CONNECT_TIMEOUT_SECONDS = 2
+
+
+def server_listens(port: int) -> bool:
+    """Return whether something accepts connections on the sccache server port.
+
+    `sccache --show-stats` can't tell: with no server it still exits 0, printing zeroed stats.
+    """
+    try:
+        with socket.create_connection((SERVER_HOST, port), timeout=CONNECT_TIMEOUT_SECONDS):
+            return True
+    except OSError:
+        return False
+
+
 SCCACHE_TIMEOUT_SECONDS = 60
 
 
@@ -173,21 +312,32 @@ class CompilerCache:
         self.before: dict | None = None
 
     def start(self) -> None:
-        """Start the server with our cache settings, warn when a running one has others, and take stats."""
+        """Start the server with our cache settings and take stats; warn when a running one has other settings.
+
+        Raises RuntimeError when no server answers, so the build stops before every compile fails.
+        """
         started = time.monotonic()
-        # The server outlives this run (other worktrees share it), so it must not hold our pipes open.
-        result = subprocess.run([str(self.sccache), "--start-server"], env=self.environment,
-                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                timeout=SCCACHE_TIMEOUT_SECONDS, check=False)
-        # A non-zero exit usually means a server is already running, which is fine.
-        LOG.debug("sccache --start-server exited with %s after %.1f s", result.returncode,
-                  time.monotonic() - started)
+        # The server outlives this run (other worktrees share it), so it must not hold our pipes open:
+        # its output goes through a file instead.
+        with tempfile.TemporaryFile() as output_file:
+            result = subprocess.run([str(self.sccache), "--start-server"], env=self.environment,
+                                    stdin=subprocess.DEVNULL, stdout=output_file, stderr=subprocess.STDOUT,
+                                    timeout=SCCACHE_TIMEOUT_SECONDS, check=False)
+            output_file.seek(0)
+            output = output_file.read().decode("utf-8", errors="replace")
+        LOG.debug("sccache --start-server exited with %s after %.1f s: %s", result.returncode,
+                  time.monotonic() - started, output.strip())
+        port = int(self.environment.get(SERVER_PORT_VARIABLE, DEFAULT_SERVER_PORT))
+        start_problem = server_start_problem(result.returncode, output, server_answers=server_listens(port),
+                                             port=port)
+        if start_problem:
+            raise RuntimeError(start_problem)
         self.before = self.read_stats()
         if self.before is None:
             return
-        problem = server_settings_problem(self.before, self.environment)
-        if problem:
-            LOG.warning(problem)
+        settings_problem = server_settings_problem(self.before, self.environment)
+        if settings_problem:
+            LOG.warning(settings_problem)
 
     def report(self) -> None:
         """Print this build's compile counts and hit rate; a warning only when stats can't be read."""
