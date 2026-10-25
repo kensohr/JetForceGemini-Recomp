@@ -57,6 +57,7 @@ all; `main` mirrors the original project's `main`.
 | Camera-relative running | `modern-camera-relative-running` | not offered |
 | Original video output | `original-video-output` | not offered |
 | Optimised from-ROM builds | `release-optimised-rom-build` | not offered |
+| Fast development builds | `fast-development-builds` | not offered |
 
 Build-only changes, which change how the game is built, not how it plays:
 
@@ -64,10 +65,13 @@ Build-only changes, which change how the game is built, not how it plays:
   `scripts/build_from_rom.py` to build the runtime with the release
   optimisations of the original project's releases, so it plays at their full
   speed. Off by default. **Status:** done.
-
-Planned build-only changes:
-
-- **Fast development builds**: rebuild in about a minute after a source
-  change, instead of regenerating and recompiling everything.
+- **Fast development builds**: `scripts/dev_build.py --rom <rom>` builds in a
+  fixed workspace per checkout and afterwards rebuilds only what changed: a
+  one-file source change takes seconds instead of a full build. It compiles
+  with Ninja, shares generated code between checkouts and uses
+  [sccache](https://github.com/mozilla/sccache) when it is installed.
+  `--bundle` refreshes a local launcher bundle for testing, and `--help`
+  lists the other options. It is a separate script: `build_from_rom.py` and
+  release builds are unchanged. **Status:** done.
 
 **Merged upstream:** none yet.
