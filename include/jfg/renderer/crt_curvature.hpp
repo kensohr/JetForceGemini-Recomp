@@ -4,7 +4,7 @@
 
 // The Screen curvature setting's video.ini values (see GLOSSARY "Screen
 // curvature"): crt_curvature=0 or 1. An unknown value reads as off;
-// video_settings_warnings (crt_curvature_settings.hpp) reports it.
+// video_settings_warnings (video_settings_warnings.hpp) reports it.
 namespace jfg {
 
 inline constexpr std::string_view crt_curvature_ini_key = "crt_curvature";

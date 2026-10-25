@@ -7,6 +7,7 @@
 #include "../../launcher/native/video_settings_dialog.hpp"
 #include "../../launcher/native/crt_filter_dialog.hpp"
 #include "../../launcher/native/crt_curvature_dialog.hpp"
+#include "../../launcher/native/video_output_dialog.hpp"
 #include "../../launcher/native/video_settings_resource.h"
 #include <algorithm>
 #include <array>
@@ -37,13 +38,9 @@ void enable_controls(HWND window) {
     EnableWindow(GetDlgItem(window, id), custom);
   EnableWindow(GetDlgItem(window, IDC_VIDEO_WINDOW_SIZE),
                selection(window, IDC_VIDEO_WINDOW_MODE) == 0);
-  enable_crt_filter_control(window, selection(window, IDC_VIDEO_OUTPUT) == 1
-                                        ? VideoOutput::original
-                                        : VideoOutput::enhanced);
-  enable_crt_curvature_control(window, selection(window, IDC_VIDEO_OUTPUT) == 1
-                                           ? VideoOutput::original
-                                           : VideoOutput::enhanced,
-                               selected_crt_filter(window));
+  const VideoOutput output = selected_video_output(window);
+  enable_crt_filter_control(window, output);
+  enable_crt_curvature_control(window, output, selected_crt_filter(window));
 }
 void close_dialog(HWND window, VideoDialogModel &model, INT_PTR result) {
   if (model.modal)
@@ -58,9 +55,7 @@ bool apply(HWND window, VideoDialogModel &model) {
       static_cast<unsigned>(selection(window, IDC_VIDEO_WINDOW_SIZE));
   candidate.pause_inactive =
       IsDlgButtonChecked(window, IDC_VIDEO_PAUSE) == BST_CHECKED;
-  candidate.rendering.output = selection(window, IDC_VIDEO_OUTPUT) == 1
-                                   ? VideoOutput::original
-                                   : VideoOutput::enhanced;
+  candidate.rendering.output = selected_video_output(window);
   candidate.rendering.crt_filter = selected_crt_filter(window);
   candidate.rendering.crt_curvature = selected_crt_curvature(window);
   candidate.rendering.vsync =

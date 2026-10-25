@@ -2,8 +2,8 @@
 // before the setting existed, unknown values reading as Off and the rule that
 // the setting only takes effect under Original video output. Kept apart from
 // video_settings_tests.cpp so upstream's test file stays unchanged.
-#include "jfg/renderer/crt_curvature_settings.hpp"
 #include "jfg/renderer/crt_filter_settings.hpp"
+#include "jfg/renderer/video_settings_warnings.hpp"
 #include <iostream>
 #include <string>
 

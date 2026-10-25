@@ -17,10 +17,7 @@ inline bool selected_crt_curvature(HWND window) {
 }
 
 inline void enable_crt_curvature_control(HWND window, VideoOutput output, CrtPreset crt_filter) {
-  VideoSettings shown;
-  shown.output = output;
-  shown.crt_filter = crt_filter;
-  EnableWindow(GetDlgItem(window, IDC_VIDEO_CRT_CURVATURE), crt_curvature_available(shown));
+  EnableWindow(GetDlgItem(window, IDC_VIDEO_CRT_CURVATURE), crt_curvature_available(output, crt_filter));
 }
 
 } // namespace jfg::frontend

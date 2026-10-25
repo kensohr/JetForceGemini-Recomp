@@ -4,6 +4,7 @@
 // selected under Original video output; otherwise the switch is disabled and
 // keeps showing the stored value.
 #include "../../include/jfg/renderer/crt_curvature_settings.hpp"
+#include "disabled_look.hpp"
 #include <RmlUi/Core.h>
 #include <string>
 
@@ -19,15 +20,7 @@ inline void refresh_crt_curvature(Rml::ElementDocument *doc, const jfg::VideoSet
   auto *button = doc->GetElementById(crt_curvature_switch_id);
   button->SetClass("selected", draft.crt_curvature);
   button->SetAttribute("aria-checked", draft.crt_curvature ? "true" : "false");
-  // RmlUi's :disabled only matches form controls, so the grey-out is set
-  // here, as the CRT filter card does.
-  if (available) {
-    button->RemoveAttribute("disabled");
-    button->RemoveProperty("opacity");
-  } else {
-    button->SetAttribute("disabled", true);
-    button->SetProperty("opacity", "0.55");
-  }
+  set_button_enabled(button, available);
   doc->GetElementById("video-crt-curvature-hint")->SetInnerRML(
       available ? "Bends the picture like a CRT tube, with darker, rounded corners."
                 : "Needs a CRT filter and Original video output.");

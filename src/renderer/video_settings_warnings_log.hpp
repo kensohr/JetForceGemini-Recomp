@@ -3,7 +3,7 @@
 // Project glue: logs the video.ini values that read as a default because
 // they are unknown (crt_curvature reads as off, crt_filter as Off), with the other
 // "Original video output: ..." lines, once when the runtime loads the file.
-#include "jfg/renderer/crt_curvature_settings.hpp"
+#include "jfg/renderer/video_settings_warnings.hpp"
 #include "original_video_output_log.hpp"
 
 #include <filesystem>
