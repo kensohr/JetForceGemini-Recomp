@@ -35,7 +35,8 @@ from generated_code_store import (  # noqa: E402
 )
 from local_app_data import jfg_root, local_app_data  # noqa: E402
 from sccache_launcher import (  # noqa: E402
-    CompilerCache, choose_launcher, launcher_change, launcher_configure_arguments, sccache_environment,
+    SERVER_PORT_VARIABLE, CompilerCache, choose_launcher, choose_server_port, launcher_change,
+    launcher_configure_arguments, read_excluded_port_ranges, sccache_environment,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -565,8 +566,14 @@ def main() -> int:
     msvc = msvc_environment(tools.vcvars)
     launcher = choose_launcher(no_sccache=args.no_sccache, found=shutil.which("sccache"))
     logging.log(launcher.level, launcher.message)
+    server_port = None
+    if launcher.launcher:
+        port_choice = choose_server_port(configured=msvc.get(SERVER_PORT_VARIABLE),
+                                         excluded=read_excluded_port_ranges())
+        logging.log(port_choice.level, port_choice.message)
+        server_port = port_choice.port
     # Set even without a launcher, so nothing ever fills sccache's default cache folder.
-    msvc.update(sccache_environment(local_app_data()))
+    msvc.update(sccache_environment(local_app_data(), server_port))
     with runner.step("dependencies"):
         prepare_dependencies(runner, dependencies)
     entry = get_store_entry(runner, store, generator_inputs, GenerateSettings(
@@ -580,6 +587,10 @@ def main() -> int:
                       clean=args.clean, regenerated=entry.outcome in REGENERATED_OUTCOMES)
     for reason in plan.reasons:
         print("Reason: " + reason, flush=True)
+    compiler_cache = CompilerCache(launcher.launcher, msvc) if launcher.launcher else None
+    if compiler_cache:
+        # Before configure, so a server that can't start stops the run before ninja fails every compile.
+        compiler_cache.start()
     if plan.configure:
         state.update(configure={"arguments": arguments, "succeeded": False})
         if plan.fresh_build_tree:
@@ -590,9 +601,6 @@ def main() -> int:
         state.update(store_key=entry_key, configure={"arguments": arguments, "succeeded": True})
     else:
         print("configure: skipped (configure arguments unchanged)", flush=True)
-    compiler_cache = CompilerCache(launcher.launcher, msvc) if launcher.launcher else None
-    if compiler_cache:
-        compiler_cache.start()
     try:
         with runner.step("build"):
             runner.run("build", build_command(cmake, build, args.jobs), env=msvc)
