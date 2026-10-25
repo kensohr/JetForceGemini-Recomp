@@ -349,12 +349,37 @@ function(_jfg_add_object_shape_audit name inventory_copy)
         ${ARG_SMOKE_TARGET}
         "${_JFG_GENERATED_REPOSITORY_ROOT}/scripts/audit_generated_objects.py"
         "${inventory_copy}"
+        # Target names give OBJECT libraries ordering only, so the objects
+        # themselves are listed to rerun the audit when one of them changes.
+        "$<TARGET_OBJECTS:${ARG_BODY_TARGET}>"
+        "$<TARGET_OBJECTS:${ARG_WRAPPER_TARGET}>"
+        "$<TARGET_OBJECTS:${ARG_SUPPORT_TARGET}>"
+        "$<TARGET_OBJECTS:${ARG_RUNTIME_TARGET}>"
+        "$<TARGET_OBJECTS:${ARG_SMOKE_TARGET}>"
+        "${body_list}"
+        "${wrapper_list}"
+        "${patch_list}"
+        "${support_list}"
+        "${runtime_list}"
+        "${smoke_list}"
     )
     if(ARG_PATCH_TARGET)
-        list(APPEND audit_dependencies ${ARG_PATCH_TARGET})
+        list(APPEND audit_dependencies
+            ${ARG_PATCH_TARGET}
+            "$<TARGET_OBJECTS:${ARG_PATCH_TARGET}>"
+        )
     endif()
 
-    add_custom_target(${name}_object_shape_audit ALL
+    # The stamp is written only after the audit passes, so a failed audit
+    # runs again on the next build. The object-role inventory is not a
+    # byproduct: the audit writes it only for version 2 inventories, and Ninja
+    # would rerun the audit on every build while a declared byproduct is missing.
+    set(audit_stamp "${audit_directory}/object-shape-audit-$<CONFIG>.stamp")
+    add_custom_command(
+        OUTPUT "${audit_stamp}"
+        BYPRODUCTS
+            "${host_function_inventory}"
+            "${host_data_inventory}"
         COMMAND "${Python3_EXECUTABLE}"
             "${_JFG_GENERATED_REPOSITORY_ROOT}/scripts/audit_generated_objects.py"
             --tool-kind "${symbol_tool_kind}"
@@ -370,9 +395,11 @@ function(_jfg_add_object_shape_audit name inventory_copy)
             --host-function-inventory-output "${host_function_inventory}"
             --host-data-inventory-output "${host_data_inventory}"
             --object-role-inventory-output "${object_role_inventory}"
+        COMMAND "${CMAKE_COMMAND}" -E touch "${audit_stamp}"
         DEPENDS ${audit_dependencies}
         VERBATIM
     )
+    add_custom_target(${name}_object_shape_audit ALL DEPENDS "${audit_stamp}")
 endfunction()
 
 # The generated root contains only data manifests and generated C/C++ inputs.
