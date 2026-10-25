@@ -76,10 +76,12 @@ Build-only changes, which change how the game is built, not how it plays:
 - **Fast development builds**: `scripts/dev_build.py --rom <rom>` builds in a
   fixed workspace per checkout and afterwards rebuilds only what changed: a
   one-file source change takes seconds instead of a full build. It compiles
-  with Ninja, shares generated code between checkouts and uses
-  [sccache](https://github.com/mozilla/sccache) when it is installed.
-  `--bundle` refreshes a local launcher bundle for testing, and `--help`
-  lists the other options. It is a separate script: `build_from_rom.py` and
+  with Ninja, shares generated code and the pinned dependencies between
+  checkouts and uses [sccache](https://github.com/mozilla/sccache) when it is
+  installed. `--checkout <path>` builds another checkout, such as a feature
+  worktree, without adding anything to it. `--bundle` refreshes a local
+  launcher bundle for testing and warns when its launcher was built from
+  other sources. `--help` lists the other options. It is a separate script: `build_from_rom.py` and
   release builds are unchanged. **Status:** done. **More:**
   [docs/development/dev-builds.md](docs/development/dev-builds.md)
 
