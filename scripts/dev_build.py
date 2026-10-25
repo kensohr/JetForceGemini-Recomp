@@ -292,7 +292,8 @@ def configure_arguments(build: Path, generated: GeneratedCode, dependencies: Pat
     """Return the cmake configure arguments (without the cmake executable).
 
     The -D definitions must match build_from_rom.py's configure step, so a
-    development build compiles the same runtime as a from-ROM build. Two are
+    development build compiles the same runtime as a from-ROM build
+    (tests/test_dev_build_parity.py checks this). Two are
     left out: JFG_SUPPORT_SYMBOLS (cmake/dev_build.cmake switches it off for
     /Z7 and links with /DEBUG itself) and JFG_MSVC_GENERATED_COMPILE_JOBS
     (MSBuild-only; Ninja parallelises across files). The compiler launcher
@@ -445,7 +446,10 @@ class GenerateSettings:
 
 
 def run_generator(runner: StepRunner, workspace: Path, settings: GenerateSettings) -> None:
-    """Generate the code from the ROM into an empty folder with the command build_from_rom.py uses."""
+    """Generate the code from the ROM into an empty folder with the command build_from_rom.py uses.
+
+    tests/test_dev_build_parity.py checks that the two commands stay the same.
+    """
     runner.run("generate", ["wsl", "-d", settings.distro, "--exec", "timeout", "--kill-after=3s",
                str(settings.timeout_seconds) + "s", "python3",
                wsl_path(settings.checkout / "scripts/generate_from_rom.py"), "--rom", wsl_path(settings.rom),
@@ -480,7 +484,7 @@ def get_store_entry(runner: StepRunner, store: Path, generator_inputs: dict[str,
 
 
 def play(executable: Path, rom: Path) -> int:
-    """Start the runtime exactly as build_from_rom.py --play does."""
+    """Start the runtime exactly as build_from_rom.py --play does (tests/test_dev_build_parity.py checks this)."""
     data_root = (Path(os.environ["JFG_DATA_ROOT"]) if os.environ.get("JFG_DATA_ROOT")
                  else local_app_data() / "JFGRecomp")
     profile = data_root / "profiles/default"
