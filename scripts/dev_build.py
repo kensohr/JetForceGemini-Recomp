@@ -6,6 +6,8 @@ Fork-only. Unlike build_from_rom.py, every run reuses one workspace,
 out of date: generate when the generated-code store (%LOCALAPPDATA%\\JFG\\g) has
 no valid entry for the ROM and generator inputs, configure when the configure
 arguments changed, and always cmake --build. All generated files stay local.
+The pinned dependencies come from a dependency set (%LOCALAPPDATA%\\JFG\\d),
+cloned only when no checkout has the same pins yet.
 """
 from __future__ import annotations
 
@@ -26,7 +28,8 @@ import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from build_paths import check_binary_path, windows_cache  # noqa: E402
-from build_from_rom import NAMES, ROM_SHA1, find_cmake, validate_rom, wsl_path  # noqa: E402
+from build_from_rom import ROM_SHA1, find_cmake, validate_rom, wsl_path  # noqa: E402
+from dependency_set import dependency_sets_root, ensure_dependency_set, git_clone, git_head  # noqa: E402
 from runtime_identity import write_identity  # noqa: E402
 import dev_bundle  # noqa: E402
 from generated_code_store import (  # noqa: E402
@@ -411,25 +414,19 @@ class StepRunner:
             raise RuntimeError(f"{name} failed (exit code {exit_code}). Local diagnostic log: {log}")
 
 
-def prepare_dependencies(runner: StepRunner, dependencies: Path) -> None:
-    """Clone the pinned dependencies that are missing; check the pinned revision of all."""
-    # The public lock file supplies repository URLs and immutable revisions.
-    lock = json.loads((ROOT / "dependencies.lock.json").read_text())
-    for entry in lock["repositories"]:
-        if entry["id"] not in NAMES:
-            continue
-        destination = dependencies / NAMES[entry["id"]]
-        if not destination.exists():
-            print(f"  {entry['id']} is missing: cloning it", flush=True)
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            runner.run("clone-" + entry["id"], ["git", "clone", "--config", "core.autocrlf=false",
-                       "--config", "core.longpaths=true", "--no-checkout", entry["url"], str(destination)])
-            runner.run("pin-" + entry["id"], ["git", "-C", str(destination), "checkout", "--detach", entry["commit"]])
-            runner.run("submodules-" + entry["id"], ["git", "-c", "core.autocrlf=false", "-c", "core.longpaths=true",
-                       "-C", str(destination), "submodule", "update", "--init", "--recursive"])
-        head = subprocess.check_output(["git", "-C", str(destination), "rev-parse", "HEAD"], text=True).strip()
-        if head != entry["commit"]:
-            raise ValueError(f"Dependency revision mismatch: {entry['id']}; existing files were preserved.")
+DEPENDENCY_SET_MESSAGES = {
+    StoreOutcome.REUSED: "dependencies: reused dependency set d\\{key}",
+    StoreOutcome.LOST_RACE: "dependencies: dependency set d\\{key} was published by another run meanwhile; using it",
+    StoreOutcome.GENERATED: "dependencies: cloned and published dependency set d\\{key}",
+    StoreOutcome.REPLACED: "dependencies: replaced dependency set d\\{key} ({reason})",
+}
+
+
+def get_dependency_set(runner: StepRunner, sets_root: Path, lock_file: Path) -> Path:
+    """Return the dependency set for the lock file's pins, cloning it when no valid one exists."""
+    result = ensure_dependency_set(sets_root, lock_file, clone=git_clone(runner.run), read_head=git_head)
+    print(DEPENDENCY_SET_MESSAGES[result.outcome].format(key=result.path.name, reason=result.reason), flush=True)
+    return result.path
 
 
 @dataclass(frozen=True)
@@ -548,7 +545,6 @@ def main() -> int:
         if not shutil.which(tool):
             raise ValueError(f"Required tool missing: {tool}")
     cache = windows_cache(ROOT)
-    dependencies = (cache / "d").resolve()
     workspace = dev_workspace(ROOT)
     build = native_build_tree(workspace)
     print("Development workspace: " + str(workspace), flush=True)
@@ -558,6 +554,8 @@ def main() -> int:
     workspace.mkdir(parents=True, exist_ok=True)
     store = generated_code_store_root()
     remove_stale_leftovers(store)
+    dependency_sets = dependency_sets_root()
+    remove_stale_leftovers(dependency_sets)
 
     generator_inputs = generator_input_fingerprint(ROOT, generator_input_paths(ROOT))
     runner = StepRunner(workspace)
@@ -575,7 +573,7 @@ def main() -> int:
     # Set even without a launcher, so nothing ever fills sccache's default cache folder.
     msvc.update(sccache_environment(local_app_data(), server_port))
     with runner.step("dependencies"):
-        prepare_dependencies(runner, dependencies)
+        dependencies = get_dependency_set(runner, dependency_sets, ROOT / "dependencies.lock.json")
     entry = get_store_entry(runner, store, generator_inputs, GenerateSettings(
         rom, dependencies, args.distro, args.generation_timeout), regenerate=args.regenerate)
     print("Generated code: " + str(entry.path), flush=True)
