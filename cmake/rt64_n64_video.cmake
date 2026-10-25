@@ -3,7 +3,9 @@
 # colour, then runs the VI's anti-aliasing, dither filter and divot filter,
 # resamples each row of a 16- or 32-bit frame to the active scanline width and
 # adds the VI's gamma-dither noise, before RT64's VI pass applies gamma and
-# scales it to the window.
+# scales it to the window. With a CRT preset, the VI pass's final draw is
+# the CRT filter (CrtFilter.hlsli, a third variant of the VI pixel shader),
+# which scales the pre-pass output to the window itself.
 #
 # VI anti-aliasing and the divot filter need each pixel's RDP coverage, which
 # RT64 doesn't produce, so the patch also reaches past the VI pass:
@@ -213,6 +215,18 @@ float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET
 
     return float4(float3(color) / 255.0f, 1.0f);
 }
+#elif defined(VI_CRT)
+// CRT filter: the final VI draw under a CRT preset, in place of the
+// pixel-scaling filter. It reads the pre-pass output and fills the viewport,
+// the same picture rectangle as the other variants; VI gamma is the signal's
+// last stage.
+#include "CrtFilter.hlsli"
+
+float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET {
+    const float2 outputSize = float2(gConstants.crtOutputWidth, gConstants.crtOutputHeight);
+    const int2 sourceSize = int2(gConstants.videoResolution);
+    return CrtFilter(gInput, sourceSize, uv * outputSize, outputSize, gConstants.crtPreset, gConstants.crtCurvature != 0, gConstants.gamma);
+}
 #else
 float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET {
 #ifdef PIXEL_ANTIALIASING]==])
@@ -239,22 +253,31 @@ float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET
         uint viAntiAliasing;
         uint divot;
         uint gammaDither;
-        uint noiseFrame;]==])
+        uint noiseFrame;
+        // CRT filter (final VI draw): the CRT preset id (0 off), the picture
+        // rectangle's size in output pixels and screen curvature (0 or 1;
+        // reserved).
+        uint crtPreset;
+        float crtOutputWidth;
+        float crtOutputHeight;
+        uint crtCurvature;]==])
     elseif(relative STREQUAL "CMakeLists.txt")
         jfg_rt64_patch_replace([==[build_pixel_shader(  rt64 "src/shaders/VideoInterfacePS.hlsl" "src/shaders/VideoInterfacePSPixel.hlsl" "-D PIXEL_ANTIALIASING")]==] [==[build_pixel_shader(  rt64 "src/shaders/VideoInterfacePS.hlsl" "src/shaders/VideoInterfacePSPixel.hlsl" "-D PIXEL_ANTIALIASING")
-build_pixel_shader(  rt64 "src/shaders/VideoInterfacePS.hlsl" "src/shaders/VideoInterfacePSPrepass.hlsl" "-D VI_PREPASS")]==])
+build_pixel_shader(  rt64 "src/shaders/VideoInterfacePS.hlsl" "src/shaders/VideoInterfacePSPrepass.hlsl" "-D VI_PREPASS")
+build_pixel_shader(  rt64 "src/shaders/VideoInterfacePS.hlsl" "src/shaders/VideoInterfacePSCrt.hlsl" "-D VI_CRT")]==])
         jfg_rt64_patch_replace([==[build_compute_shader(rt64 "src/shaders/BoxFilterCS.hlsl")]==] [==[build_compute_shader(rt64 "src/shaders/BoxFilterCS.hlsl")
 build_compute_shader(rt64 "src/shaders/CoverageEstimateCS.hlsl")]==])
     elseif(relative STREQUAL "src/render/rt64_shader_library.h")
         jfg_rt64_patch_replace([==[        ShaderRecord videoInterfacePixel;]==] [==[        ShaderRecord videoInterfacePixel;
-        ShaderRecord videoInterfacePrepass;]==])
+        ShaderRecord videoInterfacePrepass;
+        ShaderRecord videoInterfaceCrt;]==])
         jfg_rt64_patch_replace([==[        ShaderRecord boxFilter;]==] [==[        ShaderRecord boxFilter;
         ShaderRecord coverageEstimate;]==])
     elseif(relative STREQUAL "src/render/rt64_shader_library.cpp")
         foreach(prefix_format IN ITEMS "#include|spirv" "#   include|dxil" "#   include|metal")
             jfg_rt64_patch_split_pair("${prefix_format}" prefix format)
             jfg_rt64_patch_replace("${prefix} \"shaders/VideoInterfacePSPixel.hlsl.${format}.h\""
-                "${prefix} \"shaders/VideoInterfacePSPixel.hlsl.${format}.h\"\n${prefix} \"shaders/VideoInterfacePSPrepass.hlsl.${format}.h\"")
+                "${prefix} \"shaders/VideoInterfacePSPixel.hlsl.${format}.h\"\n${prefix} \"shaders/VideoInterfacePSPrepass.hlsl.${format}.h\"\n${prefix} \"shaders/VideoInterfacePSCrt.hlsl.${format}.h\"")
         endforeach()
         jfg_rt64_patch_replace([==[            videoInterfacePixel.pipeline = device->createGraphicsPipeline(pipelineDesc);]==] [==[            videoInterfacePixel.pipeline = device->createGraphicsPipeline(pipelineDesc);
 
@@ -268,7 +291,19 @@ build_compute_shader(rt64 "src/shaders/CoverageEstimateCS.hlsl")]==])
             videoInterfacePrepass.pipelineLayout = layoutBuilder.create(device);
             pipelineDesc.pixelShader = prepassShader.get();
             pipelineDesc.pipelineLayout = videoInterfacePrepass.pipelineLayout.get();
-            videoInterfacePrepass.pipeline = device->createGraphicsPipeline(pipelineDesc);]==])
+            videoInterfacePrepass.pipeline = device->createGraphicsPipeline(pipelineDesc);
+
+            // CRT filter: the VI pass's final draw under a CRT preset, with
+            // the pre-pass's inputs.
+            std::unique_ptr<RenderShader> crtShader = device->createShader(CREATE_SHADER_INPUTS(VideoInterfacePSCrtBlobDXIL, VideoInterfacePSCrtBlobSPIRV, VideoInterfacePSCrtBlobMSL, "PSMain", shaderFormat));
+            layoutBuilder.begin();
+            layoutBuilder.addPushConstant(0, 0, sizeof(interop::VideoInterfaceCB), RenderShaderStageFlag::PIXEL);
+            layoutBuilder.addDescriptorSet(nearestDescriptorSet);
+            layoutBuilder.end();
+            videoInterfaceCrt.pipelineLayout = layoutBuilder.create(device);
+            pipelineDesc.pixelShader = crtShader.get();
+            pipelineDesc.pipelineLayout = videoInterfaceCrt.pipelineLayout.get();
+            videoInterfaceCrt.pipeline = device->createGraphicsPipeline(pipelineDesc);]==])
         foreach(prefix_format IN ITEMS "#include|spirv" "#   include|dxil" "#   include|metal")
             jfg_rt64_patch_split_pair("${prefix_format}" prefix format)
             jfg_rt64_patch_replace("${prefix} \"shaders/BoxFilterCS.hlsl.${format}.h\""
@@ -324,6 +359,7 @@ build_compute_shader(rt64 "src/shaders/CoverageEstimateCS.hlsl")]==])
         jfg_rt64_patch_replace([==[#include "shared/rt64_video_interface.h"]==] [==[#include "shared/rt64_video_interface.h"
 
 #include "n64_video/colour_reduction.hpp"
+#include "n64_video/crt_filter.hpp"
 #include "n64_video/gamma_dither.hpp"
 #include "n64_video/vi_filtering.hpp"]==])
         jfg_rt64_patch_replace([==[    void VIRenderer::render(const RenderParams &p) {]==] [==[    void VIRenderer::render(const RenderParams &frameParams) {
@@ -331,7 +367,8 @@ build_compute_shader(rt64 "src/shaders/CoverageEstimateCS.hlsl")]==])
         // frame this pass scales to the window.
         RenderParams p = frameParams;
         hlslpp::float2 videoResolution = computeHDSize(hlslpp::float2(p.vi->fbSize()), p.resolutionScale, p.downsamplingScale);
-        if (renderPrepass(frameParams)) {
+        const bool prepassDrawn = renderPrepass(frameParams);
+        if (prepassDrawn) {
             p.texture = prepass.texture.get();
             p.textureWidth = prepass.width;
             p.textureHeight = prepass.height;
@@ -341,6 +378,20 @@ build_compute_shader(rt64 "src/shaders/CoverageEstimateCS.hlsl")]==])
         jfg_rt64_patch_replace([==[        interop::VideoInterfaceCB pushConstants;
         pushConstants.videoResolution = computeHDSize(hlslpp::float2(p.vi->fbSize()), p.resolutionScale, p.downsamplingScale);]==] [==[        interop::VideoInterfaceCB pushConstants = {};
         pushConstants.videoResolution = videoResolution;]==])
+        jfg_rt64_patch_replace([==[        if ((descriptorSet == nullptr) || (descriptorSetSampler != sampler)) {]==] [==[        // Video core CRT filter: under a CRT preset it draws the pre-pass
+        // output to the window in place of the pixel-scaling filter.
+        const uint32_t crtPreset = prepassDrawn ? n64_video::crt_shader_preset(n64_video::active_options()) : n64_video::crt::CrtPresetOff;
+        if (crtPreset != n64_video::crt::CrtPresetOff) {
+            shader = &p.shaderLibrary->videoInterfaceCrt;
+            sampler = p.shaderLibrary->samplerLibrary.nearest.borderBorder.get();
+        }
+
+        if ((descriptorSet == nullptr) || (descriptorSetSampler != sampler)) {]==])
+        jfg_rt64_patch_replace([==[        pushConstants.gamma = p.vi->gamma();]==] [==[        pushConstants.gamma = p.vi->gamma();
+        pushConstants.crtPreset = crtPreset;
+        pushConstants.crtOutputWidth = viewport.width;
+        pushConstants.crtOutputHeight = viewport.height;
+        pushConstants.crtCurvature = 0;]==])
         jfg_rt64_patch_replace([==[    void VIRenderer::getViewportAndScissor(]==] [==[    // Draws the frame into prepass.texture, one row per framebuffer row and
     // one column per sample of the active scanline: reduced to the console's
     // 16-bit colour (16-bit framebuffers only), anti-aliased or
@@ -536,6 +587,8 @@ function(jfg_n64_video_patch_source_view original_root source_view)
     set(core_files "${PROJECT_SOURCE_DIR}/src/renderer/n64_video")
     set(new_files
         "coverage_layout.h|src/shared/rt64_coverage_layout.h"
+        "crt_filter.h|src/shaders/crt_filter.h"
+        "CrtFilter.hlsli|src/shaders/CrtFilter.hlsli"
         "rt64_patch/CoverageEstimateCS.hlsl|src/shaders/CoverageEstimateCS.hlsl"
         "rt64_patch/CoverageRecord.hlsli|src/shaders/CoverageRecord.hlsli"
         "rt64_patch/rt64_coverage_estimate_params.h|src/shared/rt64_coverage_estimate_params.h"

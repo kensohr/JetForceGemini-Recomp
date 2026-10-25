@@ -1,5 +1,6 @@
 #pragma once
 #include "blur_settings.hpp"
+#include "crt_preset.hpp"
 #include <charconv>
 #include <filesystem>
 #include <fstream>
@@ -19,6 +20,7 @@ struct VideoSettings {
   BlurMode blur = BlurMode::reduced;
   unsigned fog_percent = 100;
   VideoOutput output = VideoOutput::enhanced;
+  CrtPreset crt_filter = CrtPreset::off;
 };
 inline bool valid_video_output(VideoOutput output) {
   return output == VideoOutput::enhanced || output == VideoOutput::original;
@@ -28,7 +30,7 @@ inline bool valid_video_settings(const VideoSettings &settings) {
           settings.mode == FrameRateMode::custom ||
           settings.mode == FrameRateMode::unlimited) &&
          settings.fps >= 60 && settings.fps <= 1000 && valid_blur_mode(settings.blur) && settings.fog_percent <= 100 &&
-         valid_video_output(settings.output);
+         valid_video_output(settings.output) && valid_crt_preset(settings.crt_filter);
 }
 inline std::optional<unsigned> parse_video_fps(std::string_view text) {
   if (text.empty())
@@ -106,6 +108,11 @@ parse_video_settings(std::string_view text) {
       if (value == "enhanced") result.output = VideoOutput::enhanced;
       else if (value == "original") result.output = VideoOutput::original;
       else return std::nullopt;
+    } else if (key == "crt_filter") {
+      bit = 128;
+      const auto preset = parse_crt_preset(value);
+      if (!preset) return std::nullopt;
+      result.crt_filter = *preset;
     } else
       return std::nullopt;
     if (seen & bit)
@@ -126,7 +133,8 @@ inline std::string serialize_video_settings(const VideoSettings &settings) {
   return std::string("version=1\nmode=") + mode +
          "\nfps=" + std::to_string(settings.fps) +
          "\nvsync=" + (settings.vsync ? "1\n" : "0\n") + "blur=" + blur + "\nfog_percent=" + std::to_string(settings.fog_percent) +
-         "\nvideo_output=" + output + "\n";
+         "\nvideo_output=" + output +
+         "\ncrt_filter=" + std::string(crt_preset_ini_value(settings.crt_filter)) + "\n";
 }
 // Missing configuration uses the original rendering mode. Corrupt or unreadable
 // configuration is reported to the caller rather than silently changing modes.
