@@ -2,6 +2,7 @@
 // before the setting existed, unknown values reading as Off and the rule that
 // the setting only takes effect under Original video output. Kept apart from
 // video_settings_tests.cpp so upstream's test file stays unchanged.
+#include "jfg/renderer/crt_curvature_settings.hpp"
 #include "jfg/renderer/crt_filter_settings.hpp"
 #include <iostream>
 #include <string>
@@ -61,6 +62,16 @@ int main() {
   for (const std::string unknown : {"", "RGB_monitor", "1", "pal_tv"}) {
     const auto parsed = jfg::parse_video_settings(legacy + "crt_filter=" + unknown + "\n");
     check(parsed && parsed->crt_filter == jfg::CrtPreset::off, "unknown CRT filter value loads as Off");
+  }
+  {
+    const auto warnings = jfg::video_settings_warnings(legacy + "crt_filter=pal_tv\n");
+    check(warnings.size() == 1 && warnings.front().find("crt_filter") != std::string::npos &&
+              warnings.front().find("pal_tv") == std::string::npos,
+          "an unknown CRT filter value gives one warning naming the key, not the value");
+    bool quiet = true;
+    for (const auto &choice : jfg::crt_presets)
+      quiet = quiet && jfg::video_settings_warnings(legacy + "crt_filter=" + std::string(choice.ini_value) + "\n").empty();
+    check(quiet, "known CRT filter values give no warning");
   }
   check(!jfg::parse_video_settings(legacy + "crt_filter=off\ncrt_filter=rgb_monitor\n"),
         "a repeated CRT filter key is rejected");

@@ -12,6 +12,9 @@ namespace jfg {
 
 enum class CrtPreset : std::uint32_t { off, rgb_monitor, composite_tv, svideo_tv };
 
+// The video.ini key the CRT filter setting is stored under.
+inline constexpr std::string_view crt_filter_ini_key = "crt_filter";
+
 struct CrtPresetChoice {
   CrtPreset preset;
   // The value written to video.ini under crt_filter.
