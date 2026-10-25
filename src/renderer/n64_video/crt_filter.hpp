@@ -12,6 +12,8 @@ namespace n64_video {
 
 static_assert(std::uint32_t(CrtPreset::off) == crt::CrtPresetOff);
 static_assert(std::uint32_t(CrtPreset::rgb_monitor) == crt::CrtPresetRgbMonitor);
+static_assert(std::uint32_t(CrtPreset::composite_tv) == crt::CrtPresetCompositeTv);
+static_assert(std::uint32_t(CrtPreset::svideo_tv) == crt::CrtPresetSvideoTv);
 
 // Whether the VI pass draws through the CRT filter: only under Original video
 // output, whose native-resolution frame it needs for clean scanlines.

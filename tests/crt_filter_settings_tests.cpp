@@ -1,5 +1,5 @@
 // CRT filter setting: video.ini round trip, the default for files written
-// before the setting existed, rejection of malformed values and the rule that
+// before the setting existed, unknown values reading as Off and the rule that
 // the setting only takes effect under Original video output. Kept apart from
 // video_settings_tests.cpp so upstream's test file stays unchanged.
 #include "jfg/renderer/crt_filter_settings.hpp"
@@ -42,9 +42,28 @@ int main() {
     const auto parsed = jfg::parse_video_settings(legacy + "crt_filter=rgb_monitor\n");
     check(parsed && parsed->crt_filter == jfg::CrtPreset::rgb_monitor, "rgb_monitor parses");
   }
-  for (const auto *bad : {"crt_filter=\n", "crt_filter=RGB_monitor\n", "crt_filter=1\n",
-                          "crt_filter=off\ncrt_filter=rgb_monitor\n"})
-    check(!jfg::parse_video_settings(legacy + bad), "malformed CRT filter value is rejected");
+  {
+    const auto composite = jfg::parse_video_settings(legacy + "crt_filter=composite_tv\n");
+    check(composite && composite->crt_filter == jfg::CrtPreset::composite_tv, "composite_tv parses");
+    const auto svideo = jfg::parse_video_settings(legacy + "crt_filter=svideo_tv\n");
+    check(svideo && svideo->crt_filter == jfg::CrtPreset::svideo_tv, "svideo_tv parses");
+  }
+  {
+    // The launcher lists Off / Composite TV / S-Video TV / RGB monitor.
+    const char *labels[] = {"Off", "Composite TV", "S-Video TV", "RGB monitor"};
+    bool ordered = jfg::crt_presets.size() == 4;
+    for (std::size_t i = 0; ordered && i < jfg::crt_presets.size(); ++i)
+      ordered = jfg::crt_presets[i].label == labels[i];
+    check(ordered, "CRT presets are listed Off / Composite TV / S-Video TV / RGB monitor");
+  }
+  // An unknown value (a typo, or a preset from a newer build) reads as Off
+  // instead of failing the whole file.
+  for (const std::string unknown : {"", "RGB_monitor", "1", "pal_tv"}) {
+    const auto parsed = jfg::parse_video_settings(legacy + "crt_filter=" + unknown + "\n");
+    check(parsed && parsed->crt_filter == jfg::CrtPreset::off, "unknown CRT filter value loads as Off");
+  }
+  check(!jfg::parse_video_settings(legacy + "crt_filter=off\ncrt_filter=rgb_monitor\n"),
+        "a repeated CRT filter key is rejected");
   {
     jfg::VideoSettings invalid{};
     invalid.crt_filter = static_cast<jfg::CrtPreset>(jfg::crt_presets.size());

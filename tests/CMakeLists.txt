@@ -827,6 +827,12 @@ target_compile_features(jfg_n64_video_crt_filter_tests PRIVATE cxx_std_20)
 jfg_set_project_warnings(jfg_n64_video_crt_filter_tests)
 add_test(NAME jfg.n64_video_crt_filter COMMAND jfg_n64_video_crt_filter_tests)
 
+add_executable(jfg_n64_video_crt_tv_presets_tests n64_video_crt_tv_presets_tests.cpp)
+target_include_directories(jfg_n64_video_crt_tv_presets_tests PRIVATE "${PROJECT_SOURCE_DIR}/src/renderer" "${PROJECT_SOURCE_DIR}/include")
+target_compile_features(jfg_n64_video_crt_tv_presets_tests PRIVATE cxx_std_20)
+jfg_set_project_warnings(jfg_n64_video_crt_tv_presets_tests)
+add_test(NAME jfg.n64_video_crt_tv_presets COMMAND jfg_n64_video_crt_tv_presets_tests)
+
 add_executable(jfg_original_video_output_log_tests original_video_output_log_tests.cpp)
 target_include_directories(jfg_original_video_output_log_tests PRIVATE "${PROJECT_SOURCE_DIR}/src/renderer")
 target_link_libraries(jfg_original_video_output_log_tests PRIVATE jfg_runtime)

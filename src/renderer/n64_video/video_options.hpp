@@ -12,6 +12,8 @@ namespace n64_video {
 enum class CrtPreset : std::uint32_t {
     off = 0,
     rgb_monitor = 1,
+    composite_tv = 2,
+    svideo_tv = 3,
 };
 
 struct VideoOptions {

@@ -110,9 +110,8 @@ parse_video_settings(std::string_view text) {
       else return std::nullopt;
     } else if (key == "crt_filter") {
       bit = 128;
-      const auto preset = parse_crt_preset(value);
-      if (!preset) return std::nullopt;
-      result.crt_filter = *preset;
+      // Unknown values (a typo, or a preset of a newer build) read as Off.
+      result.crt_filter = parse_crt_preset(value).value_or(CrtPreset::off);
     } else
       return std::nullopt;
     if (seen & bit)

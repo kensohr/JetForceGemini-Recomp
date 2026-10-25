@@ -11,6 +11,10 @@ constexpr n64_video::CrtPreset video_core_crt_preset(CrtPreset preset) {
     switch (preset) {
     case CrtPreset::rgb_monitor:
         return n64_video::CrtPreset::rgb_monitor;
+    case CrtPreset::composite_tv:
+        return n64_video::CrtPreset::composite_tv;
+    case CrtPreset::svideo_tv:
+        return n64_video::CrtPreset::svideo_tv;
     case CrtPreset::off:
         break;
     }

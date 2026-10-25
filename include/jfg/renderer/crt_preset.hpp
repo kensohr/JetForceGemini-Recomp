@@ -7,9 +7,10 @@
 // The CRT filter setting's values (see GLOSSARY "CRT filter", "CRT preset"):
 // Off or one CRT preset. Each value is listed once in crt_presets, in the
 // order the launcher shows them; a new preset adds an enum value and a row.
+// Enum values are only ever appended, so they never change meaning.
 namespace jfg {
 
-enum class CrtPreset : std::uint32_t { off, rgb_monitor };
+enum class CrtPreset : std::uint32_t { off, rgb_monitor, composite_tv, svideo_tv };
 
 struct CrtPresetChoice {
   CrtPreset preset;
@@ -21,8 +22,10 @@ struct CrtPresetChoice {
   std::string_view ui_id;
 };
 
-inline constexpr std::array<CrtPresetChoice, 2> crt_presets{{
+inline constexpr std::array<CrtPresetChoice, 4> crt_presets{{
     {CrtPreset::off, "off", "Off", "off"},
+    {CrtPreset::composite_tv, "composite_tv", "Composite TV", "composite-tv"},
+    {CrtPreset::svideo_tv, "svideo_tv", "S-Video TV", "svideo-tv"},
     {CrtPreset::rgb_monitor, "rgb_monitor", "RGB monitor", "rgb-monitor"},
 }};
 

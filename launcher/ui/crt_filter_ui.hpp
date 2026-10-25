@@ -11,7 +11,8 @@
 namespace jfg_video {
 
 inline constexpr const char *crt_filter_search_keywords =
-    "crt filter scanlines rgb monitor pvm tv aperture grille mask display retro";
+    "crt filter scanlines rgb monitor pvm tv composite s-video svideo colour color bleed "
+    "aperture grille slot mask display retro";
 
 inline constexpr std::string_view crt_filter_id_prefix = "video-crt-";
 
