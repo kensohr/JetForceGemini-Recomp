@@ -19,8 +19,11 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from package_beta import digest  # noqa: E402
 
-LOG = logging.getLogger("dev_bundle")
+LOG = logging.getLogger("dev_bundle_launcher_source")
 RECEIPT_NAME = "launcher-build.json"
+MALFORMED_REASON = f"{RECEIPT_NAME} is malformed"
+# The receipt fields the comparison needs, with the JSON type each must have.
+REQUIRED_FIELDS = {"source_commit": str, "executable_sha256": str, "inputs": dict}
 LAUNCHER_BUILD_COMMAND = (r"powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build_launcher.ps1 "
                           r"-OutputDirectory $env:LOCALAPPDATA\JFG\l")
 # The warning lists this many differing files; a launcher from another branch can differ in dozens.
@@ -48,8 +51,12 @@ def unknown_source(reason: str) -> LauncherSource:
 
 def is_well_formed(receipt: object) -> bool:
     """Return whether a parsed receipt has the fields the comparison needs."""
-    return (isinstance(receipt, dict) and isinstance(receipt.get("executable_sha256"), str)
-            and isinstance(receipt.get("inputs"), dict))
+    if not isinstance(receipt, dict):
+        return False
+    for field, field_type in REQUIRED_FIELDS.items():
+        if not isinstance(receipt.get(field), field_type):
+            return False
+    return True
 
 
 def compare_launcher_source(receipt: object, launcher_sha256: str, checkout_digest: CheckoutDigest) -> LauncherSource:
@@ -57,11 +64,11 @@ def compare_launcher_source(receipt: object, launcher_sha256: str, checkout_dige
     if receipt is None:
         return unknown_source(f"no {RECEIPT_NAME} next to the launcher")
     if not is_well_formed(receipt):
-        return unknown_source(f"{RECEIPT_NAME} is malformed")
+        return unknown_source(MALFORMED_REASON)
     if receipt["executable_sha256"].lower() != launcher_sha256:
         return unknown_source(f"{RECEIPT_NAME} describes another build of the launcher")
     differing = tuple(path for path, sha256 in receipt["inputs"].items() if checkout_digest(path) != sha256)
-    return LauncherSource(source_commit=receipt.get("source_commit"), differing_inputs=differing)
+    return LauncherSource(source_commit=receipt["source_commit"], differing_inputs=differing)
 
 
 def launcher_source_warning(source: LauncherSource, identity: Mapping[str, str]) -> str | None:
@@ -86,16 +93,24 @@ def runtime_description(identity: Mapping[str, str]) -> str:
     return f"{commit} with uncommitted changes" if identity.get("build_dirty") == "1" else commit
 
 
-def read_receipt(path: Path) -> object:
-    """Return the parsed receipt, None when it is missing, or a non-receipt value when it isn't valid JSON."""
-    if not path.is_file():
-        return None
+def read_receipt(path: Path) -> object | None:
+    """Return the parsed JSON of a receipt file, or None when it can't be read or isn't JSON."""
     try:
         # build_launcher.ps1 runs under Windows PowerShell, which may write a BOM.
         return json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         LOG.debug("Unreadable launcher receipt %s", path, exc_info=True)
-        return "unreadable"
+        return None
+
+
+def receipt_source(receipt_path: Path, launcher_sha256: str, checkout_digest: CheckoutDigest) -> LauncherSource:
+    """Compare the receipt file next to the launcher, missing or not, with the runtime's checkout."""
+    if not receipt_path.is_file():
+        return compare_launcher_source(None, launcher_sha256, checkout_digest)
+    receipt = read_receipt(receipt_path)
+    if receipt is None:
+        return unknown_source(MALFORMED_REASON)
+    return compare_launcher_source(receipt, launcher_sha256, checkout_digest)
 
 
 def checkout_digest_reader(checkout: Path) -> CheckoutDigest:
@@ -109,7 +124,7 @@ def checkout_digest_reader(checkout: Path) -> CheckoutDigest:
 def check_launcher_source(launcher: Path, checkout: Path, identity: Mapping[str, str]) -> str | None:
     """Return the warning for a launcher built from other or unknown sources than the runtime's checkout."""
     receipt_path = launcher.parent / RECEIPT_NAME
-    source = compare_launcher_source(read_receipt(receipt_path), digest(launcher), checkout_digest_reader(checkout))
+    source = receipt_source(receipt_path, digest(launcher), checkout_digest_reader(checkout))
     if source.unknown_reason is None and not source.differing_inputs:
         LOG.debug("Launcher sources match the runtime checkout %s (launcher %s, runtime %s)", checkout,
                   source.source_commit, identity.get("build_source"))

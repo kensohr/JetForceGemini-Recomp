@@ -35,7 +35,7 @@ import time
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from build_paths import check_binary_path, windows_cache  # noqa: E402
 from build_from_rom import ROM_SHA1, find_cmake, validate_rom, wsl_path  # noqa: E402
-from dependency_set import dependency_sets_root, ensure_dependency_set, git_clone, git_head  # noqa: E402
+from dependency_set import dependency_sets_root, ensure_dependency_set, git_clone, git_head, git_output  # noqa: E402
 from runtime_identity import write_identity  # noqa: E402
 import dev_bundle  # noqa: E402
 from generated_code_store import (  # noqa: E402
@@ -188,13 +188,8 @@ def target_layout(checkout: Path, cache_base: Path | None = None) -> TargetLayou
 
 def describe_checkout(label: str, checkout: Path) -> str:
     """Return a log line naming a checkout, its short commit and whether tracked files are changed."""
-    def git(*arguments: str) -> str | None:
-        completed = subprocess.run(["git", "-C", str(checkout), *arguments], capture_output=True, text=True,
-                                   errors="replace", check=False)
-        return completed.stdout.strip() if completed.returncode == 0 else None
-
-    commit = git("rev-parse", "--short", "HEAD") or "unknown commit"
-    has_changes = bool(git("status", "--porcelain", "--untracked-files=no"))
+    commit = git_output(checkout, "rev-parse", "--short", "HEAD") or "unknown commit"
+    has_changes = bool(git_output(checkout, "status", "--porcelain", "--untracked-files=no"))
     changes_text = " (tracked files changed)" if has_changes else ""
     return f"{label}: {checkout} at {commit}{changes_text}"
 
@@ -381,10 +376,14 @@ GENERATOR_STAGE = re.compile(r"[a-z][a-z-]+\n?")
 
 
 class StepRunner:
-    """Runs and times the steps of a run, with one log file per command."""
+    """Runs and times the steps of a run, with one log file per command.
 
-    def __init__(self, workspace: Path) -> None:
+    Commands run from the checkout being built, not from the script's own.
+    """
+
+    def __init__(self, workspace: Path, *, checkout: Path) -> None:
         self.logs = workspace / LOG_FOLDER_NAME
+        self.checkout = checkout
         self.timings: list[dict[str, object]] = []
 
     @contextmanager
@@ -401,12 +400,12 @@ class StepRunner:
             self.timings.append({"step": name, "seconds": seconds, "succeeded": succeeded})
             print(f"{name}: {'done' if succeeded else 'failed'} in {seconds} s", flush=True)
 
-    def run(self, name: str, command: list[str], cwd: Path = ROOT, env: Mapping[str, str] | None = None) -> None:
+    def run(self, name: str, command: list[str], env: Mapping[str, str] | None = None) -> None:
         """Run a command with its output in the log; raise naming the log on failure."""
         self.logs.mkdir(parents=True, exist_ok=True)
         log = self.logs / (name + ".log")
         with log.open("w", encoding="utf-8", buffering=1) as stream:
-            with subprocess.Popen(command, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            with subprocess.Popen(command, cwd=self.checkout, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                   text=True, errors="replace", env=env) as process:
                 for line in process.stdout:
                     stream.write(line)
@@ -496,6 +495,7 @@ def play(executable: Path, rom: Path) -> int:
 
 
 def resolved_path(text: str) -> Path:
+    """Return a command-line path as an absolute path (argparse type for --checkout)."""
     return Path(text).resolve()
 
 
@@ -583,7 +583,7 @@ def main() -> int:
     if stamp_warning:
         logging.warning("%s", stamp_warning)
 
-    runner = StepRunner(workspace)
+    runner = StepRunner(workspace, checkout=target)
     state = DevState(workspace)
     # Ninja, unlike MSBuild, needs cl and link on PATH; captured once per run.
     msvc = msvc_environment(tools.vcvars)

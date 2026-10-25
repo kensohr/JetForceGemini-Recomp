@@ -69,7 +69,10 @@ class LauncherSourceTests(unittest.TestCase):
         for name, malformed in (("not an object", ["inputs"]), ("no inputs", {"source_commit": "06713e8",
                                                                              "executable_sha256": LAUNCHER_SHA256}),
                                 ("inputs not an object", receipt(inputs=["launcher/windows/Launcher.cs"])),
-                                ("no exe digest", {"source_commit": "06713e8", "inputs": dict(CHECKOUT)})):
+                                ("no exe digest", {"source_commit": "06713e8", "inputs": dict(CHECKOUT)}),
+                                ("no source commit", {"executable_sha256": LAUNCHER_SHA256,
+                                                      "inputs": dict(CHECKOUT)}),
+                                ("source commit not a string", receipt(source_commit=None))):
             with self.subTest(name):
                 self.assert_unknown_source(warning_for(malformed), "launcher-build.json is malformed")
 

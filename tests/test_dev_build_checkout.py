@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,6 +14,7 @@ from scripts.dev_build import (
     ROOT,
     GeneratedCode,
     GenerateSettings,
+    StepRunner,
     argument_parser,
     audit_stamp_warning,
     check_target_checkout,
@@ -113,6 +115,15 @@ class GeneratorTests(TargetCheckoutTestCase):
     def test_runs_the_scripts_generator_by_default(self) -> None:
         script = self.generator_script(self.settings())
         self.assertTrue(script.endswith("/" + ROOT.name + "/scripts/generate_from_rom.py"), script)
+
+
+class StepRunnerTests(TargetCheckoutTestCase):
+    def test_runs_commands_from_the_target_checkout(self) -> None:
+        workspace = self.target / "workspace"
+        runner = StepRunner(workspace, checkout=self.target)
+        runner.run("print-cwd", [sys.executable, "-c", "import os; print(os.getcwd())"])
+        log = (workspace / "logs" / "print-cwd.log").read_text(encoding="utf-8")
+        self.assertEqual(Path(log.strip()).resolve(), self.target)
 
 
 class TargetLayoutTests(TargetCheckoutTestCase):

@@ -11,7 +11,7 @@ always complete. Nothing in the development build writes into a set.
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 import hashlib
 import json
 import logging
@@ -51,8 +51,14 @@ class PinnedDependency:
 def pinned_dependencies(lock_file: Path) -> list[PinnedDependency]:
     """Return the lock file's pins of the four dependencies, in lock-file order."""
     lock = json.loads(lock_file.read_text(encoding="utf-8"))
-    return [PinnedDependency(*(entry[field] for field in KEY_FIELDS))
+    return [PinnedDependency(id=entry["id"], url=entry["url"], commit=entry["commit"])
             for entry in lock["repositories"] if entry["id"] in NAMES]
+
+
+def key_fields(pin: PinnedDependency) -> dict[str, str]:
+    """Return the fields of a pin that go into the dependency-set key."""
+    fields = asdict(pin)
+    return {name: fields[name] for name in KEY_FIELDS}
 
 
 def dependency_set_key(lock_file: Path) -> str:
@@ -62,7 +68,7 @@ def dependency_set_key(lock_file: Path) -> str:
     checkout keys from that checkout's pins.
     """
     pins = sorted(pinned_dependencies(lock_file), key=lambda pin: pin.id)
-    document = [{field: getattr(pin, field) for field in KEY_FIELDS} for pin in pins]
+    document = [key_fields(pin) for pin in pins]
     canonical = json.dumps(document, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:KEY_LENGTH]
 
@@ -112,20 +118,32 @@ def ensure_dependency_set(sets_root: Path, lock_file: Path, *, clone: Clone, rea
 RunCommand = Callable[[str, list[str]], None]
 
 
+def git_config_arguments(flag: str) -> list[str]:
+    """Return GIT_CLONE_OPTIONS as git config arguments, each option after flag (--config or -c)."""
+    arguments = []
+    for option in GIT_CLONE_OPTIONS:
+        arguments += [flag, option]
+    return arguments
+
+
 def git_clone(run_command: RunCommand) -> Clone:
     """Return a Clone that clones, pins and updates submodules recursively with run_command(name, command)."""
     def clone(pin: PinnedDependency, destination: Path) -> None:
-        clone_config = [argument for option in GIT_CLONE_OPTIONS for argument in ("--config", option)]
-        run_command("clone-" + pin.id, ["git", "clone", *clone_config, "--no-checkout", pin.url, str(destination)])
+        run_command("clone-" + pin.id, ["git", "clone", *git_config_arguments("--config"), "--no-checkout", pin.url,
+                                        str(destination)])
         run_command("pin-" + pin.id, ["git", "-C", str(destination), "checkout", "--detach", pin.commit])
-        submodule_config = [argument for option in GIT_CLONE_OPTIONS for argument in ("-c", option)]
-        run_command("submodules-" + pin.id, ["git", *submodule_config, "-C", str(destination), "submodule", "update",
-                                             "--init", "--recursive"])
+        run_command("submodules-" + pin.id, ["git", *git_config_arguments("-c"), "-C", str(destination), "submodule",
+                                             "update", "--init", "--recursive"])
     return clone
+
+
+def git_output(checkout: Path, *arguments: str) -> str | None:
+    """Return the stripped output of a git command run in a checkout, or None when git fails."""
+    completed = subprocess.run(["git", "-C", str(checkout), *arguments], capture_output=True, text=True,
+                               errors="replace", check=False)
+    return completed.stdout.strip() if completed.returncode == 0 else None
 
 
 def git_head(checkout: Path) -> str | None:
     """Return a checkout's HEAD commit, or None when git can't read it."""
-    completed = subprocess.run(["git", "-C", str(checkout), "rev-parse", "HEAD"], capture_output=True, text=True,
-                               check=False)
-    return completed.stdout.strip() if completed.returncode == 0 else None
+    return git_output(checkout, "rev-parse", "HEAD")
