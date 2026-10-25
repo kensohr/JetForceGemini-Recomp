@@ -50,7 +50,7 @@ prints why each step runs or is skipped:
 
 | Step | Runs when |
 | --- | --- |
-| dependencies | The checkout's first run clones the pinned dependencies; later runs only check them. |
+| dependencies | No [dependency set](#dependencies-are-shared) matches the pinned revisions yet: it is cloned once. Otherwise the set is reused and only checked. |
 | generate | No [stored generated code](#generated-code-is-shared) matches the ROM and the generator inputs. |
 | configure | There is no CMake cache yet, the last configure failed, the configure arguments changed (including turning sccache on or off), the generated code changed, the build tree was configured by another CMake generator (it is then recreated), or `--clean` or `--reconfigure` is given. Each reason is printed as `Reason: ...`. |
 | build | Always; Ninja does nothing when nothing changed. |
@@ -90,13 +90,28 @@ Old entries are not removed automatically. Delete `g\<key>` folders that no
 build uses any more; `dev\dev-build.json` names the `store_key` each
 workspace uses.
 
+## Dependencies are shared
+
+The four pinned dependencies (the decompilation, N64Recomp, N64ModernRuntime
+and RT64) are cloned once per set of pinned revisions into
+`%LOCALAPPDATA%\JFG\d\<key>\`, a dependency set, and shared by every
+checkout and worktree. The key comes from their id, URL and commit in
+`dependencies.lock.json`, so a new worktree on the same pins clones nothing.
+Changing a pin clones a new set; switching back reuses the earlier one.
+Each run checks every dependency's revision; a set that fails the check is
+moved aside and cloned again. `build_from_rom.py` still uses the checkout's
+own `JFG\b\<checkout-hash>\d`.
+
+Old sets are not removed automatically. Delete `d\<key>` folders that no
+checkout's pins use any more.
+
 ## sccache
 
 When `sccache` is on `PATH`, every compile goes through it. Its cache is
 `%LOCALAPPDATA%\JFG\cache\sccache`, capped at 20 GB. After each build a line
 reports the hit rate. A new worktree, or a clean rebuild of the same
 checkout, compiles almost entirely from the cache. sccache can't speed up
-shader compiles, linking, configure or a new checkout's dependency clone.
+shader compiles, linking, configure or the clone of a new dependency set.
 
 - **Port reserved by Windows.** Hyper-V and WSL reserve TCP port ranges, which
   can change after a reboot (`netsh int ipv4 show excludedportrange
