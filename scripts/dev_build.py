@@ -6,6 +6,14 @@ Fork-only. Unlike build_from_rom.py, every run reuses one workspace,
 out of date: generate when the generated-code store (%LOCALAPPDATA%\\JFG\\g) has
 no valid entry for the ROM and generator inputs, configure when the configure
 arguments changed, and always cmake --build. All generated files stay local.
+The pinned dependencies come from a dependency set (%LOCALAPPDATA%\\JFG\\d),
+cloned only when no checkout has the same pins yet.
+
+--checkout builds another checkout of this project, e.g. a worktree of a
+branch that doesn't contain this script. That checkout supplies everything
+that is built (sources, lock file, generator) and gets its own workspace; this
+script's checkout supplies only the build tooling and cmake/dev_build.cmake.
+Nothing is written into the target checkout.
 """
 from __future__ import annotations
 
@@ -26,7 +34,8 @@ import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from build_paths import check_binary_path, windows_cache  # noqa: E402
-from build_from_rom import NAMES, ROM_SHA1, find_cmake, validate_rom, wsl_path  # noqa: E402
+from build_from_rom import ROM_SHA1, find_cmake, validate_rom, wsl_path  # noqa: E402
+from dependency_set import dependency_sets_root, ensure_dependency_set, git_clone, git_head, git_output  # noqa: E402
 from runtime_identity import write_identity  # noqa: E402
 import dev_bundle  # noqa: E402
 from generated_code_store import (  # noqa: E402
@@ -34,11 +43,13 @@ from generated_code_store import (  # noqa: E402
     remove_stale_leftovers, remove_tree, store_entry_path, store_key,
 )
 from local_app_data import jfg_root, local_app_data  # noqa: E402
+from msvc_toolchain import find_visual_studio, msvc_environment, visual_studio_tools  # noqa: E402
 from sccache_launcher import (  # noqa: E402
     SERVER_PORT_VARIABLE, CompilerCache, choose_launcher, choose_server_port, launcher_change,
     launcher_configure_arguments, read_excluded_port_ranges, sccache_environment,
 )
 
+# The script's own checkout: the build tooling, and the default target checkout.
 ROOT = Path(__file__).resolve().parents[1]
 DEV_WORKSPACE_NAME = "dev"
 GENERATED_CODE_STORE_NAME = "g"
@@ -51,7 +62,14 @@ DEFAULT_JOBS = min(os.cpu_count() or 4, MAX_JOBS)  # one per logical core
 # generate_from_rom.py's parallelism, as build_from_rom.py passes it by default; --jobs is for cmake --build only.
 GENERATION_JOBS = min(os.cpu_count() or 4, 8)
 DEV_GENERATOR = "Ninja"
+# Always the script's, whatever checkout is built, so a target needs no copy of it.
 DEV_CACHE_FILE = ROOT / "cmake" / "dev_build.cmake"
+LOCK_FILE_NAME = "dependencies.lock.json"
+# What a folder must contain to be built as a checkout of this project.
+CHECKOUT_MARKERS = ("CMakeLists.txt", LOCK_FILE_NAME)
+GENERATED_CODE_CMAKE = "cmake/GeneratedCode.cmake"
+# Part of the object-shape audit stamp added in commit 0acc320; branches cut from main before it lack it.
+AUDIT_STAMP_MARKER = "object-shape-audit-$<CONFIG>.stamp"
 DEFAULT_GENERATION_TIMEOUT_SECONDS = 3600
 MAX_GENERATION_TIMEOUT_SECONDS = 7200
 
@@ -130,6 +148,50 @@ def generator_input_fingerprint(root: Path, relative_paths: Iterable[str]) -> di
             raise ValueError("Generator input is missing: " + relative)
         fingerprint[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
     return fingerprint
+
+
+def check_target_checkout(checkout: Path) -> None:
+    """Fail naming what is missing when a folder isn't a checkout of this project."""
+    missing = [marker for marker in CHECKOUT_MARKERS if not (checkout / marker).is_file()]
+    if missing:
+        raise ValueError(f"{checkout} is not a checkout of JetForceGemini-Recomp: missing {', '.join(missing)}")
+
+
+def audit_stamp_warning(checkout: Path) -> str | None:
+    """Return the warning for a checkout whose GeneratedCode.cmake lacks the audit stamp, or None."""
+    generated_code = checkout / GENERATED_CODE_CMAKE
+    has_stamp = generated_code.is_file() and AUDIT_STAMP_MARKER in generated_code.read_text(
+        encoding="utf-8", errors="replace")
+    if has_stamp:
+        return None
+    return (f"{checkout} has no object-shape audit stamp in {GENERATED_CODE_CMAKE} (commit 0acc320): "
+            "the object-shape audit will run on every build, adding a few seconds even when nothing changed")
+
+
+@dataclass(frozen=True)
+class TargetLayout:
+    """What a run takes from the checkout it builds."""
+
+    checkout: Path
+    cache: Path
+    workspace: Path
+    lock_file: Path
+    generator_inputs: dict[str, str]
+
+
+def target_layout(checkout: Path, cache_base: Path | None = None) -> TargetLayout:
+    """Return the per-checkout cache, workspace, lock file and generator inputs of the checkout being built."""
+    return TargetLayout(checkout=checkout, cache=windows_cache(checkout, cache_base),
+                        workspace=dev_workspace(checkout, cache_base), lock_file=checkout / LOCK_FILE_NAME,
+                        generator_inputs=generator_input_fingerprint(checkout, generator_input_paths(checkout)))
+
+
+def describe_checkout(label: str, checkout: Path) -> str:
+    """Return a log line naming a checkout, its short commit and whether tracked files are changed."""
+    commit = git_output(checkout, "rev-parse", "--short", "HEAD") or "unknown commit"
+    has_changes = bool(git_output(checkout, "status", "--porcelain", "--untracked-files=no"))
+    changes_text = " (tracked files changed)" if has_changes else ""
+    return f"{label}: {checkout} at {commit}{changes_text}"
 
 
 @dataclass(frozen=True)
@@ -221,17 +283,19 @@ def generated_code_configure_arguments(generated: GeneratedCode) -> list[str]:
 
 
 def configure_arguments(build: Path, generated: GeneratedCode, dependencies: Path, ninja: Path,
-                        launcher: Path | None = None) -> list[str]:
+                        launcher: Path | None = None, *, checkout: Path = ROOT) -> list[str]:
     """Return the cmake configure arguments (without the cmake executable).
 
     The -D definitions must match build_from_rom.py's configure step, so a
-    development build compiles the same runtime as a from-ROM build. Two are
+    development build compiles the same runtime as a from-ROM build
+    (tests/test_dev_build_parity.py checks this). Two are
     left out: JFG_SUPPORT_SYMBOLS (cmake/dev_build.cmake switches it off for
     /Z7 and links with /DEBUG itself) and JFG_MSVC_GENERATED_COMPILE_JOBS
     (MSBuild-only; Ninja parallelises across files). The compiler launcher
-    (sccache, or None) is development-build only.
+    (sccache, or None) is development-build only. The source is the checkout
+    being built; the cache file is always the script's own.
     """
-    return ["-S", str(ROOT), "-B", str(build), "-C", str(DEV_CACHE_FILE),
+    return ["-S", str(checkout), "-B", str(build), "-C", str(DEV_CACHE_FILE),
             "-G", DEV_GENERATOR, "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_MAKE_PROGRAM=" + str(ninja),
             "-DBUILD_TESTING=OFF", "-DJFG_ENABLE_GENERATED_CODE=ON", "-DJFG_BUILD_PHASE6_NATIVE_BOOT=ON",
             "-DJFG_BUILD_PHASE8_LIVE=ON", "-DJFG_ENABLE_RT64=ON",
@@ -262,68 +326,6 @@ def cache_generator(cmake_cache: str) -> str | None:
     """Return the generator a CMakeCache.txt names, or None when it names none."""
     match = CMAKE_CACHE_GENERATOR.search(cmake_cache)
     return match.group(1).strip() if match else None
-
-
-@dataclass(frozen=True)
-class VisualStudioTools:
-    """The MSVC environment script and Ninja of a Visual Studio 2022 install."""
-
-    vcvars: Path
-    ninja: Path
-
-
-VCVARS_PATH = "VC/Auxiliary/Build/vcvars64.bat"
-NINJA_PATH = "Common7/IDE/CommonExtensions/Microsoft/CMake/Ninja/ninja.exe"
-
-
-def visual_studio_tools(install: Path) -> VisualStudioTools:
-    """Return vcvars64.bat and the bundled ninja.exe of an install; fail naming a missing one."""
-    tools = VisualStudioTools(vcvars=install / VCVARS_PATH, ninja=install / NINJA_PATH)
-    for tool in (tools.vcvars, tools.ninja):
-        if not tool.is_file():
-            raise ValueError(f"Required tool missing: {tool}. Install the Visual Studio 2022 C++ desktop "
-                             "tools with CMake support.")
-    return tools
-
-
-# Printed between vcvars64.bat's banner and the `set` listing of the environment it leaves.
-ENVIRONMENT_MARKER = "===ENVIRONMENT==="
-
-
-def parse_environment_listing(listing: str) -> dict[str, str]:
-    """Return the variables of a `set` listing that follows ENVIRONMENT_MARKER."""
-    _, marker, variables = listing.partition(ENVIRONMENT_MARKER)
-    if not marker:
-        raise ValueError("vcvars64.bat did not finish; the MSVC environment is unknown.")
-    environment = {}
-    for line in variables.splitlines():
-        name, separator, value = line.partition("=")
-        # cmd keeps per-drive working folders as hidden "=C:" variables; skip them.
-        if separator and name:
-            environment[name] = value
-    return environment
-
-
-def find_visual_studio() -> Path:
-    """Return the VS 2022 install with C++ tools that vswhere reports, as find_cmake searches it."""
-    base = Path(os.environ.get("ProgramFiles(x86)", "C:/Program Files (x86)"))
-    vswhere = base / "Microsoft Visual Studio/Installer/vswhere.exe"
-    if not vswhere.is_file():
-        raise ValueError(f"Required tool missing: {vswhere}")
-    found = subprocess.check_output([str(vswhere), "-latest", "-products", "*",
-                                     "-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
-                                     "-property", "installationPath"], text=True).strip().splitlines()
-    if not found:
-        raise ValueError("Install Visual Studio 2022 C++ desktop tools with CMake support.")
-    return Path(found[0])
-
-
-def msvc_environment(vcvars: Path) -> dict[str, str]:
-    """Run vcvars64.bat and return the x64 MSVC environment it leaves."""
-    # cmd /s strips the outer quotes and keeps the quoted path with spaces intact.
-    command = f'cmd /d /s /c ""{vcvars}" >nul && echo {ENVIRONMENT_MARKER} && set"'
-    listing = subprocess.run(command, capture_output=True, text=True, errors="replace", check=False).stdout
-    return parse_environment_listing(listing)
 
 
 def read_workspace_state(workspace: Path) -> WorkspaceState:
@@ -374,10 +376,14 @@ GENERATOR_STAGE = re.compile(r"[a-z][a-z-]+\n?")
 
 
 class StepRunner:
-    """Runs and times the steps of a run, with one log file per command."""
+    """Runs and times the steps of a run, with one log file per command.
 
-    def __init__(self, workspace: Path) -> None:
+    Commands run from the checkout being built, not from the script's own.
+    """
+
+    def __init__(self, workspace: Path, *, checkout: Path) -> None:
         self.logs = workspace / LOG_FOLDER_NAME
+        self.checkout = checkout
         self.timings: list[dict[str, object]] = []
 
     @contextmanager
@@ -394,12 +400,12 @@ class StepRunner:
             self.timings.append({"step": name, "seconds": seconds, "succeeded": succeeded})
             print(f"{name}: {'done' if succeeded else 'failed'} in {seconds} s", flush=True)
 
-    def run(self, name: str, command: list[str], cwd: Path = ROOT, env: Mapping[str, str] | None = None) -> None:
+    def run(self, name: str, command: list[str], env: Mapping[str, str] | None = None) -> None:
         """Run a command with its output in the log; raise naming the log on failure."""
         self.logs.mkdir(parents=True, exist_ok=True)
         log = self.logs / (name + ".log")
         with log.open("w", encoding="utf-8", buffering=1) as stream:
-            with subprocess.Popen(command, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            with subprocess.Popen(command, cwd=self.checkout, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                   text=True, errors="replace", env=env) as process:
                 for line in process.stdout:
                     stream.write(line)
@@ -411,25 +417,19 @@ class StepRunner:
             raise RuntimeError(f"{name} failed (exit code {exit_code}). Local diagnostic log: {log}")
 
 
-def prepare_dependencies(runner: StepRunner, dependencies: Path) -> None:
-    """Clone the pinned dependencies that are missing; check the pinned revision of all."""
-    # The public lock file supplies repository URLs and immutable revisions.
-    lock = json.loads((ROOT / "dependencies.lock.json").read_text())
-    for entry in lock["repositories"]:
-        if entry["id"] not in NAMES:
-            continue
-        destination = dependencies / NAMES[entry["id"]]
-        if not destination.exists():
-            print(f"  {entry['id']} is missing: cloning it", flush=True)
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            runner.run("clone-" + entry["id"], ["git", "clone", "--config", "core.autocrlf=false",
-                       "--config", "core.longpaths=true", "--no-checkout", entry["url"], str(destination)])
-            runner.run("pin-" + entry["id"], ["git", "-C", str(destination), "checkout", "--detach", entry["commit"]])
-            runner.run("submodules-" + entry["id"], ["git", "-c", "core.autocrlf=false", "-c", "core.longpaths=true",
-                       "-C", str(destination), "submodule", "update", "--init", "--recursive"])
-        head = subprocess.check_output(["git", "-C", str(destination), "rev-parse", "HEAD"], text=True).strip()
-        if head != entry["commit"]:
-            raise ValueError(f"Dependency revision mismatch: {entry['id']}; existing files were preserved.")
+DEPENDENCY_SET_MESSAGES = {
+    StoreOutcome.REUSED: "dependencies: reused dependency set d\\{key}",
+    StoreOutcome.LOST_RACE: "dependencies: dependency set d\\{key} was published by another run meanwhile; using it",
+    StoreOutcome.GENERATED: "dependencies: cloned and published dependency set d\\{key}",
+    StoreOutcome.REPLACED: "dependencies: replaced dependency set d\\{key} ({reason})",
+}
+
+
+def get_dependency_set(runner: StepRunner, sets_root: Path, lock_file: Path) -> Path:
+    """Return the dependency set for the lock file's pins, cloning it when no valid one exists."""
+    result = ensure_dependency_set(sets_root, lock_file, clone=git_clone(runner.run), read_head=git_head)
+    print(DEPENDENCY_SET_MESSAGES[result.outcome].format(key=result.path.name, reason=result.reason), flush=True)
+    return result.path
 
 
 @dataclass(frozen=True)
@@ -440,13 +440,18 @@ class GenerateSettings:
     dependencies: Path
     distro: str
     timeout_seconds: int
+    # The checkout being built: its own generator must produce its code.
+    checkout: Path = ROOT
 
 
 def run_generator(runner: StepRunner, workspace: Path, settings: GenerateSettings) -> None:
-    """Generate the code from the ROM into an empty folder with the command build_from_rom.py uses."""
+    """Generate the code from the ROM into an empty folder with the command build_from_rom.py uses.
+
+    tests/test_dev_build_parity.py checks that the two commands stay the same.
+    """
     runner.run("generate", ["wsl", "-d", settings.distro, "--exec", "timeout", "--kill-after=3s",
                str(settings.timeout_seconds) + "s", "python3",
-               wsl_path(ROOT / "scripts/generate_from_rom.py"), "--rom", wsl_path(settings.rom),
+               wsl_path(settings.checkout / "scripts/generate_from_rom.py"), "--rom", wsl_path(settings.rom),
                "--workspace", wsl_path(workspace), "--dependency-root", wsl_path(settings.dependencies),
                "--jobs", str(GENERATION_JOBS)])
 
@@ -478,7 +483,7 @@ def get_store_entry(runner: StepRunner, store: Path, generator_inputs: dict[str,
 
 
 def play(executable: Path, rom: Path) -> int:
-    """Start the runtime exactly as build_from_rom.py --play does."""
+    """Start the runtime exactly as build_from_rom.py --play does (tests/test_dev_build_parity.py checks this)."""
     data_root = (Path(os.environ["JFG_DATA_ROOT"]) if os.environ.get("JFG_DATA_ROOT")
                  else local_app_data() / "JFGRecomp")
     profile = data_root / "profiles/default"
@@ -489,10 +494,21 @@ def play(executable: Path, rom: Path) -> int:
                            cwd=executable.parent, env=environment)
 
 
+def resolved_path(text: str) -> Path:
+    """Return a command-line path as an absolute path (argparse type for --checkout)."""
+    return Path(text).resolve()
+
+
 def argument_parser() -> argparse.ArgumentParser:
     """Return the parser for dev_build.py's command line (range checks are in parse_arguments)."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--rom", required=True, type=Path)
+    parser.add_argument("--checkout", type=resolved_path, default=ROOT,
+                        help="Checkout to build (default: this script's checkout). Use it to build a worktree of a "
+                             "branch that doesn't contain this script: the target supplies the sources, lock file "
+                             "and generator and gets its own workspace; only the build tooling and "
+                             "cmake/dev_build.cmake come from this script's checkout. Nothing is written into the "
+                             "target.")
     parser.add_argument("--distro", default="Ubuntu-24.04")
     parser.add_argument("--jobs", type=int, default=DEFAULT_JOBS,
                         help="Parallel compile jobs (default: the number of logical cores)")
@@ -539,6 +555,10 @@ def main() -> int:
     args = parse_arguments()
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     started = time.monotonic()
+    target = args.checkout
+    check_target_checkout(target)  # Reject before any step runs.
+    logging.info("%s", describe_checkout("Script checkout", ROOT))
+    logging.info("%s", describe_checkout("Target checkout", target))
     rom = args.rom.resolve()
     validate_rom(rom)  # Reject before downloads or build output.
     dev_bundle.check_bundle_arguments(args)
@@ -547,20 +567,23 @@ def main() -> int:
     for tool in ("git", "wsl"):
         if not shutil.which(tool):
             raise ValueError(f"Required tool missing: {tool}")
-    cache = windows_cache(ROOT)
-    dependencies = (cache / "d").resolve()
-    workspace = dev_workspace(ROOT)
+    layout = target_layout(target)
+    workspace = layout.workspace
     build = native_build_tree(workspace)
     print("Development workspace: " + str(workspace), flush=True)
     if args.clean:
         print("--clean given: deleting the development workspace", flush=True)
-        remove_dev_workspace(workspace, cache)
+        remove_dev_workspace(workspace, layout.cache)
     workspace.mkdir(parents=True, exist_ok=True)
     store = generated_code_store_root()
     remove_stale_leftovers(store)
+    dependency_sets = dependency_sets_root()
+    remove_stale_leftovers(dependency_sets)
+    stamp_warning = audit_stamp_warning(target)
+    if stamp_warning:
+        logging.warning("%s", stamp_warning)
 
-    generator_inputs = generator_input_fingerprint(ROOT, generator_input_paths(ROOT))
-    runner = StepRunner(workspace)
+    runner = StepRunner(workspace, checkout=target)
     state = DevState(workspace)
     # Ninja, unlike MSBuild, needs cl and link on PATH; captured once per run.
     msvc = msvc_environment(tools.vcvars)
@@ -575,14 +598,14 @@ def main() -> int:
     # Set even without a launcher, so nothing ever fills sccache's default cache folder.
     msvc.update(sccache_environment(local_app_data(), server_port))
     with runner.step("dependencies"):
-        prepare_dependencies(runner, dependencies)
-    entry = get_store_entry(runner, store, generator_inputs, GenerateSettings(
-        rom, dependencies, args.distro, args.generation_timeout), regenerate=args.regenerate)
+        dependencies = get_dependency_set(runner, dependency_sets, layout.lock_file)
+    entry = get_store_entry(runner, store, layout.generator_inputs, GenerateSettings(
+        rom, dependencies, args.distro, args.generation_timeout, target), regenerate=args.regenerate)
     print("Generated code: " + str(entry.path), flush=True)
 
     entry_key = entry.path.name
     arguments = configure_arguments(build, generated_code_location(entry.path), dependencies, tools.ninja,
-                                    launcher.launcher)
+                                    launcher.launcher, checkout=target)
     plan = plan_build(read_workspace_state(workspace), entry_key, arguments, reconfigure=args.reconfigure,
                       clean=args.clean, regenerated=entry.outcome in REGENERATED_OUTCOMES)
     for reason in plan.reasons:
@@ -610,10 +633,10 @@ def main() -> int:
     executable = runtime_executable(build)
     if not executable.is_file():
         raise RuntimeError("Build finished without the native executable.")
-    write_identity(executable, ROOT)
+    write_identity(executable, target)
     if args.bundle:
         with runner.step("bundle"):
-            dev_bundle.refresh_after_build(args, executable, ROOT, find_visual_studio)
+            dev_bundle.refresh_after_build(args, executable, target, find_visual_studio)
 
     total_seconds = round(time.monotonic() - started, 1)
     state.update(last_run={"steps": runner.timings, "total_seconds": total_seconds})

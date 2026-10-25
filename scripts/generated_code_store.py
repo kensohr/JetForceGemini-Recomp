@@ -155,15 +155,20 @@ class StoreResult:
     reason: str | None = None
 
 
+def entry_label(entry: Path) -> str:
+    """Name an entry with its root folder (g or d), since dependency sets publish the same way as store entries."""
+    return str(Path(entry.parent.name, entry.name))
+
+
 def staging_folder(store: Path, key: str) -> Path:
     """Return a new, unique staging folder name for an entry; nothing at this name is ever used."""
     return store / f"{key}{STAGING_MARK}{secrets.token_hex(4)}"
 
 
 def move_aside(entry: Path, problem: str) -> Path:
-    """Rename an unusable entry to g\\<key>.bad-<random>, keeping it for diagnosis; never delete it in place."""
+    """Rename an unusable entry to <key>.bad-<random>, keeping it for diagnosis; never delete it in place."""
     moved = entry.with_name(f"{entry.name}{MOVED_ASIDE_MARK}{secrets.token_hex(4)}")
-    log.warning("Store entry %s is unusable (%s); moving it aside to %s", entry.name, problem, moved.name)
+    log.warning("Entry %s is unusable (%s); moving it aside to %s", entry_label(entry), problem, moved.name)
     os.rename(entry, moved)
     return moved
 
@@ -189,13 +194,13 @@ def ensure_store_entry(store: Path, key: str, generate: Callable[[Path], None],
     generate(staging)
     staging_problem = validate(staging)
     if staging_problem:
-        raise RuntimeError(f"Generated code in {staging} is unusable ({staging_problem}); it was not published.")
+        raise RuntimeError(f"Staged entry {staging} is unusable ({staging_problem}); it was not published.")
     if not publish(staging, entry):
-        log.info("Store entry %s was published by another run meanwhile; discarding %s", key, staging.name)
+        log.info("Entry %s was published by another run meanwhile; discarding %s", entry_label(entry), staging.name)
         remove_tree(staging)
         lost_race_problem = validate(entry)
         if lost_race_problem:
-            raise RuntimeError(f"Store entry {entry} published by another run is unusable ({lost_race_problem}).")
+            raise RuntimeError(f"Entry {entry} published by another run is unusable ({lost_race_problem}).")
         return StoreResult(entry, StoreOutcome.LOST_RACE)
     outcome = StoreOutcome.REPLACED if replace_reason else StoreOutcome.GENERATED
     return StoreResult(entry, outcome, replace_reason)
@@ -244,7 +249,7 @@ def remove_stale_leftovers(store: Path, now: float | None = None,
         age_seconds = now - path.stat().st_mtime
         if age_seconds < max_age_seconds:
             continue
-        log.info("Deleting stale store folder %s (%.0f h old)", path.name, age_seconds / 3600)
+        log.info("Deleting stale folder %s (%.0f h old)", entry_label(path), age_seconds / 3600)
         remove_tree(path)
         removed.append(path)
     return removed
