@@ -75,6 +75,7 @@ plays at the same speed.
 | `--regenerate` | Generate the code again, replacing the stored entry. |
 | `--no-sccache` | Compile without sccache even when it is installed. |
 | `--bundle` | Refresh the [development bundle](#test-in-the-launcher) after the build. |
+| `--checkout PATH` | Build [another checkout](#build-another-checkout) instead of the script's own (the default). |
 
 `python scripts/dev_build.py --help` lists them all, including `--distro`,
 `--generation-timeout`, `--bundle-dir`, `--launcher` and `--vc-runtime`.
@@ -104,6 +105,65 @@ own `JFG\b\<checkout-hash>\d`.
 
 Old sets are not removed automatically. Delete `d\<key>` folders that no
 checkout's pins use any more.
+
+## Build another checkout
+
+`dev_build.py` exists only on this fork's tooling branch, so a branch cut
+from `main` doesn't contain it. To build such a branch without merging the
+tooling into it, check the branch out in a worktree and run the script from a
+checkout that has it, with `--checkout` pointing at the worktree:
+
+```powershell
+git worktree add D:\work\my-feature my-feature
+python scripts/dev_build.py --rom 'D:\Games\my-copy.z64' --checkout D:\work\my-feature
+```
+
+Run the same command after every change in the worktree. Without
+`--checkout`, the script builds its own checkout, as before.
+
+### Which checkout supplies what
+
+| From the target checkout (`--checkout`) | From the script's checkout |
+| --- | --- |
+| The source code that is compiled into the exe | The Python build scripts (`dev_build.py` and the modules it imports) |
+| `dependencies.lock.json`, which picks the [dependency set](#dependencies-are-shared) | `cmake/dev_build.cmake`, the development compile settings |
+| `scripts/generate_from_rom.py` and the other generator inputs, which pick the [generated code](#generated-code-is-shared) | |
+| The workspace, `%LOCALAPPDATA%\JFG\b\<target-checkout-hash>\dev` | |
+| The commit recorded next to the exe and in the development bundle | |
+
+The generated code (`JFG\g`) and the dependency sets (`JFG\d`) stay shared by
+every checkout. Their keys are computed from the target checkout, so a
+branch with other pins or another generator gets its own entry, and a branch
+with the same ones reuses the existing entries.
+
+### How it works
+
+Each build step is a command pointed at a checkout:
+
+1. **dependencies**: the target's `dependencies.lock.json` gives the key of
+   the dependency set to reuse or clone.
+2. **generate**: the target's `generate_from_rom.py` runs in WSL, so the
+   generated code matches the target's own generator.
+3. **configure**: `cmake -S <target> -C <script checkout>\cmake\dev_build.cmake`.
+   `-S` picks the source that goes into the exe; `-C` only preloads cache
+   settings, so the target needs no copy of that file.
+4. **build**: `cmake --build` on the target's workspace.
+
+Only the tooling and the cache file come from the script's checkout. Nothing
+is written into the target checkout: `git status` there stays clean.
+
+At the start of a run, the script prints both checkouts and their commits
+(`Script checkout:` and `Target checkout:`), noting changed tracked files. A
+folder that has no `CMakeLists.txt` or `dependencies.lock.json` is refused
+before any step runs. `--clean` deletes only the target's workspace.
+
+### Branches without the audit stamp
+
+On this fork, the object-shape audit of the generated objects runs only when
+they change (commit `0acc320`, in `cmake/GeneratedCode.cmake`). A branch cut
+from `main` before that change runs the audit on every build, which adds
+about 7 seconds even when nothing changed; the build is still correct. The
+script then prints a warning before the build. It doesn't patch the target.
 
 ## sccache
 

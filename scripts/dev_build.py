@@ -8,6 +8,12 @@ no valid entry for the ROM and generator inputs, configure when the configure
 arguments changed, and always cmake --build. All generated files stay local.
 The pinned dependencies come from a dependency set (%LOCALAPPDATA%\\JFG\\d),
 cloned only when no checkout has the same pins yet.
+
+--checkout builds another checkout of this project, e.g. a worktree of a
+branch that doesn't contain this script. That checkout supplies everything
+that is built (sources, lock file, generator) and gets its own workspace; this
+script's checkout supplies only the build tooling and cmake/dev_build.cmake.
+Nothing is written into the target checkout.
 """
 from __future__ import annotations
 
@@ -42,6 +48,7 @@ from sccache_launcher import (  # noqa: E402
     launcher_configure_arguments, read_excluded_port_ranges, sccache_environment,
 )
 
+# The script's own checkout: the build tooling, and the default target checkout.
 ROOT = Path(__file__).resolve().parents[1]
 DEV_WORKSPACE_NAME = "dev"
 GENERATED_CODE_STORE_NAME = "g"
@@ -54,7 +61,14 @@ DEFAULT_JOBS = min(os.cpu_count() or 4, MAX_JOBS)  # one per logical core
 # generate_from_rom.py's parallelism, as build_from_rom.py passes it by default; --jobs is for cmake --build only.
 GENERATION_JOBS = min(os.cpu_count() or 4, 8)
 DEV_GENERATOR = "Ninja"
+# Always the script's, whatever checkout is built, so a target needs no copy of it.
 DEV_CACHE_FILE = ROOT / "cmake" / "dev_build.cmake"
+LOCK_FILE_NAME = "dependencies.lock.json"
+# What a folder must contain to be built as a checkout of this project.
+CHECKOUT_MARKERS = ("CMakeLists.txt", LOCK_FILE_NAME)
+GENERATED_CODE_CMAKE = "cmake/GeneratedCode.cmake"
+# Part of the object-shape audit stamp added in commit 0acc320; branches cut from main before it lack it.
+AUDIT_STAMP_MARKER = "object-shape-audit-$<CONFIG>.stamp"
 DEFAULT_GENERATION_TIMEOUT_SECONDS = 3600
 MAX_GENERATION_TIMEOUT_SECONDS = 7200
 
@@ -133,6 +147,55 @@ def generator_input_fingerprint(root: Path, relative_paths: Iterable[str]) -> di
             raise ValueError("Generator input is missing: " + relative)
         fingerprint[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
     return fingerprint
+
+
+def check_target_checkout(checkout: Path) -> None:
+    """Fail naming what is missing when a folder isn't a checkout of this project."""
+    missing = [marker for marker in CHECKOUT_MARKERS if not (checkout / marker).is_file()]
+    if missing:
+        raise ValueError(f"{checkout} is not a checkout of JetForceGemini-Recomp: missing {', '.join(missing)}")
+
+
+def audit_stamp_warning(checkout: Path) -> str | None:
+    """Return the warning for a checkout whose GeneratedCode.cmake lacks the audit stamp, or None."""
+    generated_code = checkout / GENERATED_CODE_CMAKE
+    has_stamp = generated_code.is_file() and AUDIT_STAMP_MARKER in generated_code.read_text(
+        encoding="utf-8", errors="replace")
+    if has_stamp:
+        return None
+    return (f"{checkout} has no object-shape audit stamp in {GENERATED_CODE_CMAKE} (commit 0acc320): "
+            "the object-shape audit will run on every build, adding a few seconds even when nothing changed")
+
+
+@dataclass(frozen=True)
+class TargetLayout:
+    """What a run takes from the checkout it builds."""
+
+    checkout: Path
+    cache: Path
+    workspace: Path
+    lock_file: Path
+    generator_inputs: dict[str, str]
+
+
+def target_layout(checkout: Path, cache_base: Path | None = None) -> TargetLayout:
+    """Return the per-checkout cache, workspace, lock file and generator inputs of the checkout being built."""
+    return TargetLayout(checkout=checkout, cache=windows_cache(checkout, cache_base),
+                        workspace=dev_workspace(checkout, cache_base), lock_file=checkout / LOCK_FILE_NAME,
+                        generator_inputs=generator_input_fingerprint(checkout, generator_input_paths(checkout)))
+
+
+def describe_checkout(label: str, checkout: Path) -> str:
+    """Return a log line naming a checkout, its short commit and whether tracked files are changed."""
+    def git(*arguments: str) -> str | None:
+        completed = subprocess.run(["git", "-C", str(checkout), *arguments], capture_output=True, text=True,
+                                   errors="replace", check=False)
+        return completed.stdout.strip() if completed.returncode == 0 else None
+
+    commit = git("rev-parse", "--short", "HEAD") or "unknown commit"
+    has_changes = bool(git("status", "--porcelain", "--untracked-files=no"))
+    changes_text = " (tracked files changed)" if has_changes else ""
+    return f"{label}: {checkout} at {commit}{changes_text}"
 
 
 @dataclass(frozen=True)
@@ -224,7 +287,7 @@ def generated_code_configure_arguments(generated: GeneratedCode) -> list[str]:
 
 
 def configure_arguments(build: Path, generated: GeneratedCode, dependencies: Path, ninja: Path,
-                        launcher: Path | None = None) -> list[str]:
+                        launcher: Path | None = None, *, checkout: Path = ROOT) -> list[str]:
     """Return the cmake configure arguments (without the cmake executable).
 
     The -D definitions must match build_from_rom.py's configure step, so a
@@ -232,9 +295,10 @@ def configure_arguments(build: Path, generated: GeneratedCode, dependencies: Pat
     left out: JFG_SUPPORT_SYMBOLS (cmake/dev_build.cmake switches it off for
     /Z7 and links with /DEBUG itself) and JFG_MSVC_GENERATED_COMPILE_JOBS
     (MSBuild-only; Ninja parallelises across files). The compiler launcher
-    (sccache, or None) is development-build only.
+    (sccache, or None) is development-build only. The source is the checkout
+    being built; the cache file is always the script's own.
     """
-    return ["-S", str(ROOT), "-B", str(build), "-C", str(DEV_CACHE_FILE),
+    return ["-S", str(checkout), "-B", str(build), "-C", str(DEV_CACHE_FILE),
             "-G", DEV_GENERATOR, "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_MAKE_PROGRAM=" + str(ninja),
             "-DBUILD_TESTING=OFF", "-DJFG_ENABLE_GENERATED_CODE=ON", "-DJFG_BUILD_PHASE6_NATIVE_BOOT=ON",
             "-DJFG_BUILD_PHASE8_LIVE=ON", "-DJFG_ENABLE_RT64=ON",
@@ -437,13 +501,15 @@ class GenerateSettings:
     dependencies: Path
     distro: str
     timeout_seconds: int
+    # The checkout being built: its own generator must produce its code.
+    checkout: Path = ROOT
 
 
 def run_generator(runner: StepRunner, workspace: Path, settings: GenerateSettings) -> None:
     """Generate the code from the ROM into an empty folder with the command build_from_rom.py uses."""
     runner.run("generate", ["wsl", "-d", settings.distro, "--exec", "timeout", "--kill-after=3s",
                str(settings.timeout_seconds) + "s", "python3",
-               wsl_path(ROOT / "scripts/generate_from_rom.py"), "--rom", wsl_path(settings.rom),
+               wsl_path(settings.checkout / "scripts/generate_from_rom.py"), "--rom", wsl_path(settings.rom),
                "--workspace", wsl_path(workspace), "--dependency-root", wsl_path(settings.dependencies),
                "--jobs", str(GENERATION_JOBS)])
 
@@ -486,10 +552,20 @@ def play(executable: Path, rom: Path) -> int:
                            cwd=executable.parent, env=environment)
 
 
+def resolved_path(text: str) -> Path:
+    return Path(text).resolve()
+
+
 def argument_parser() -> argparse.ArgumentParser:
     """Return the parser for dev_build.py's command line (range checks are in parse_arguments)."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--rom", required=True, type=Path)
+    parser.add_argument("--checkout", type=resolved_path, default=ROOT,
+                        help="Checkout to build (default: this script's checkout). Use it to build a worktree of a "
+                             "branch that doesn't contain this script: the target supplies the sources, lock file "
+                             "and generator and gets its own workspace; only the build tooling and "
+                             "cmake/dev_build.cmake come from this script's checkout. Nothing is written into the "
+                             "target.")
     parser.add_argument("--distro", default="Ubuntu-24.04")
     parser.add_argument("--jobs", type=int, default=DEFAULT_JOBS,
                         help="Parallel compile jobs (default: the number of logical cores)")
@@ -536,6 +612,10 @@ def main() -> int:
     args = parse_arguments()
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     started = time.monotonic()
+    target = args.checkout
+    check_target_checkout(target)  # Reject before any step runs.
+    logging.info("%s", describe_checkout("Script checkout", ROOT))
+    logging.info("%s", describe_checkout("Target checkout", target))
     rom = args.rom.resolve()
     validate_rom(rom)  # Reject before downloads or build output.
     dev_bundle.check_bundle_arguments(args)
@@ -544,20 +624,22 @@ def main() -> int:
     for tool in ("git", "wsl"):
         if not shutil.which(tool):
             raise ValueError(f"Required tool missing: {tool}")
-    cache = windows_cache(ROOT)
-    workspace = dev_workspace(ROOT)
+    layout = target_layout(target)
+    workspace = layout.workspace
     build = native_build_tree(workspace)
     print("Development workspace: " + str(workspace), flush=True)
     if args.clean:
         print("--clean given: deleting the development workspace", flush=True)
-        remove_dev_workspace(workspace, cache)
+        remove_dev_workspace(workspace, layout.cache)
     workspace.mkdir(parents=True, exist_ok=True)
     store = generated_code_store_root()
     remove_stale_leftovers(store)
     dependency_sets = dependency_sets_root()
     remove_stale_leftovers(dependency_sets)
+    stamp_warning = audit_stamp_warning(target)
+    if stamp_warning:
+        logging.warning("%s", stamp_warning)
 
-    generator_inputs = generator_input_fingerprint(ROOT, generator_input_paths(ROOT))
     runner = StepRunner(workspace)
     state = DevState(workspace)
     # Ninja, unlike MSBuild, needs cl and link on PATH; captured once per run.
@@ -573,14 +655,14 @@ def main() -> int:
     # Set even without a launcher, so nothing ever fills sccache's default cache folder.
     msvc.update(sccache_environment(local_app_data(), server_port))
     with runner.step("dependencies"):
-        dependencies = get_dependency_set(runner, dependency_sets, ROOT / "dependencies.lock.json")
-    entry = get_store_entry(runner, store, generator_inputs, GenerateSettings(
-        rom, dependencies, args.distro, args.generation_timeout), regenerate=args.regenerate)
+        dependencies = get_dependency_set(runner, dependency_sets, layout.lock_file)
+    entry = get_store_entry(runner, store, layout.generator_inputs, GenerateSettings(
+        rom, dependencies, args.distro, args.generation_timeout, target), regenerate=args.regenerate)
     print("Generated code: " + str(entry.path), flush=True)
 
     entry_key = entry.path.name
     arguments = configure_arguments(build, generated_code_location(entry.path), dependencies, tools.ninja,
-                                    launcher.launcher)
+                                    launcher.launcher, checkout=target)
     plan = plan_build(read_workspace_state(workspace), entry_key, arguments, reconfigure=args.reconfigure,
                       clean=args.clean, regenerated=entry.outcome in REGENERATED_OUTCOMES)
     for reason in plan.reasons:
@@ -608,10 +690,10 @@ def main() -> int:
     executable = runtime_executable(build)
     if not executable.is_file():
         raise RuntimeError("Build finished without the native executable.")
-    write_identity(executable, ROOT)
+    write_identity(executable, target)
     if args.bundle:
         with runner.step("bundle"):
-            dev_bundle.refresh_after_build(args, executable, ROOT, find_visual_studio)
+            dev_bundle.refresh_after_build(args, executable, target, find_visual_studio)
 
     total_seconds = round(time.monotonic() - started, 1)
     state.update(last_run={"steps": runner.timings, "total_seconds": total_seconds})
