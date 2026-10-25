@@ -40,11 +40,13 @@ GIT_CONFIG = ("-c", "core.autocrlf=false", "-c", "core.safecrlf=false", "-c", "c
 
 
 def pinned_rt64_commit() -> str:
+    """Return the RT64 commit dependencies.lock.json pins."""
     lock = json.loads(LOCK_PATH.read_text(encoding="utf-8"))
     return next(repo["commit"] for repo in lock["repositories"] if repo["id"] == "rt64")
 
 
 def checkout_revision(path: Path) -> str | None:
+    """Return the commit checked out at `path`, or None if it isn't a git checkout."""
     result = subprocess.run(["git", "-C", str(path), "rev-parse", "HEAD"], capture_output=True, text=True)
     return result.stdout.strip() if result.returncode == 0 else None
 
@@ -64,6 +66,7 @@ def find_pinned_rt64(checkout: Path = ROOT) -> Path | None:
 
 
 def find_cmake() -> Path | None:
+    """Return cmake from PATH or a Visual Studio install, or None if there is none."""
     on_path = shutil.which("cmake")
     if on_path:
         return Path(on_path)
@@ -75,6 +78,7 @@ def find_cmake() -> Path | None:
 
 
 def git(repository: Path, *arguments: str) -> str:
+    """Run git with `arguments` in `repository` and return its output; raise if it fails."""
     result = subprocess.run(["git", *GIT_CONFIG, "-C", str(repository), *arguments],
                             capture_output=True, text=True, encoding="utf-8", check=True)
     return result.stdout
@@ -84,13 +88,17 @@ def snapshot_tree(repository: Path, files: Path) -> str:
     """Replaces the repository's work tree with `files` and returns its git tree id."""
     for entry in repository.iterdir():
         if entry.name != ".git":
-            shutil.rmtree(entry) if entry.is_dir() else entry.unlink()
+            if entry.is_dir():
+                shutil.rmtree(entry)
+            else:
+                entry.unlink()
     shutil.copytree(files, repository, dirs_exist_ok=True)
     git(repository, "add", "--all")
     return git(repository, "write-tree").strip()
 
 
 def patch_header(rt64_commit: str) -> str:
+    """Return the text the .patch starts with, naming the RT64 commit it applies to."""
     return (
         "Video core RT64 patch (src/renderer/n64_video/), against RT64 "
         f"{rt64_commit}.\n"
@@ -119,6 +127,7 @@ def export_patch(rt64_root: Path, cmake: Path) -> str:
 
 
 def main() -> int:
+    """Write or check the .patch; return the process exit code."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--check", action="store_true", help="fail if the .patch differs from a fresh export")
     parser.add_argument("--rt64-root", type=Path, help="the pinned RT64 checkout")

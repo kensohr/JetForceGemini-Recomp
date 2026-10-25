@@ -3,6 +3,7 @@
 // warning, and the rule that it only applies while a CRT filter runs. Kept
 // apart from video_settings_tests.cpp so upstream's test file stays unchanged.
 #include "jfg/renderer/crt_curvature_settings.hpp"
+#include "jfg/renderer/video_settings_warnings.hpp"
 #include <iostream>
 #include <string>
 
@@ -64,6 +65,10 @@ int main() {
   enhanced.output = jfg::VideoOutput::enhanced;
   check(!jfg::crt_curvature_available(enhanced), "unavailable under Enhanced");
   check(!jfg::effective_crt_curvature(enhanced), "ignored under Enhanced");
+  check(jfg::crt_curvature_available(jfg::VideoOutput::original, jfg::CrtPreset::rgb_monitor) &&
+            !jfg::crt_curvature_available(jfg::VideoOutput::original, jfg::CrtPreset::off) &&
+            !jfg::crt_curvature_available(jfg::VideoOutput::enhanced, jfg::CrtPreset::rgb_monitor),
+        "availability from output and preset matches the settings overload");
   {
     // Disabled keeps the stored value.
     const auto restored = jfg::parse_video_settings(jfg::serialize_video_settings(enhanced));

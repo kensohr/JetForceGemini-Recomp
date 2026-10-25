@@ -105,7 +105,7 @@
 #include "jfg/runtime/pc_rumble_output.hpp"
 #include "jfg/runtime/pc_camera_visibility.hpp"
 #include "jfg/runtime/support_log.hpp"
-#include "../renderer/crt_curvature_log.hpp"
+#include "../renderer/video_settings_warnings_log.hpp"
 #include "jfg/runtime/support_snapshot.hpp"
 #include <iterator>
 #include "jfg/runtime/rt64_overlay_address.hpp"

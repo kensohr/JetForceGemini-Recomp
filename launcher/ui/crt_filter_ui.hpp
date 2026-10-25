@@ -4,6 +4,7 @@
 // only applies under Original video output; under Enhanced the buttons are
 // disabled and keep showing the stored preset.
 #include "../../include/jfg/renderer/crt_filter_settings.hpp"
+#include "disabled_look.hpp"
 #include <RmlUi/Core.h>
 #include <string>
 #include <string_view>
@@ -27,15 +28,7 @@ inline void refresh_crt_filter(Rml::ElementDocument *doc, const jfg::VideoSettin
     const bool on = draft.crt_filter == choice.preset;
     button->SetClass("selected", on);
     button->SetAttribute("aria-checked", on ? "true" : "false");
-    // RmlUi's :disabled only matches form controls, not these buttons, so
-    // the grey-out is set here (the page's disabled look: opacity 0.55).
-    if (available) {
-      button->RemoveAttribute("disabled");
-      button->RemoveProperty("opacity");
-    } else {
-      button->SetAttribute("disabled", true);
-      button->SetProperty("opacity", "0.55");
-    }
+    set_button_enabled(button, available);
   }
   doc->GetElementById("video-crt-hint")->SetInnerRML(
       !available ? "Needs Original video output."

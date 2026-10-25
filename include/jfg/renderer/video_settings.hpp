@@ -110,9 +110,10 @@ parse_video_settings(std::string_view text) {
       if (value == "enhanced") result.output = VideoOutput::enhanced;
       else if (value == "original") result.output = VideoOutput::original;
       else return std::nullopt;
-    } else if (key == "crt_filter") {
+    } else if (key == crt_filter_ini_key) {
       bit = 128;
-      // Unknown values (a typo, or a preset of a newer build) read as Off.
+      // Unknown values (a typo, or a preset of a newer build) read as Off;
+      // video_settings_warnings reports them.
       result.crt_filter = parse_crt_preset(value).value_or(CrtPreset::off);
     } else if (key == crt_curvature_ini_key) {
       bit = 256;
@@ -139,7 +140,7 @@ inline std::string serialize_video_settings(const VideoSettings &settings) {
          "\nfps=" + std::to_string(settings.fps) +
          "\nvsync=" + (settings.vsync ? "1\n" : "0\n") + "blur=" + blur + "\nfog_percent=" + std::to_string(settings.fog_percent) +
          "\nvideo_output=" + output +
-         "\ncrt_filter=" + std::string(crt_preset_ini_value(settings.crt_filter)) +
+         "\n" + std::string(crt_filter_ini_key) + "=" + std::string(crt_preset_ini_value(settings.crt_filter)) +
          "\n" + std::string(crt_curvature_ini_key) + "=" + std::string(crt_curvature_ini_value(settings.crt_curvature)) + "\n";
 }
 // Missing configuration uses the original rendering mode. Corrupt or unreadable
