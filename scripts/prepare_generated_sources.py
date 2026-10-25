@@ -253,9 +253,21 @@ def _source_list(
     return resolved
 
 
+def _write_if_changed(path: Path, payload: bytes) -> None:
+    # Every configure reruns preparation; keeping an unchanged file's mtime
+    # stops build steps that depend on it (the object-shape audit) rerunning.
+    if path.is_file() and path.read_bytes() == payload:
+        return
+    path.write_bytes(payload)
+
+
+def _write_text_line(path: Path, value: Path) -> None:
+    _write_if_changed(path, f"{value.as_posix()}\n".encode("utf-8"))
+
+
 def _write_lines(path: Path, values: Sequence[Path]) -> None:
     text = "".join(f"{value.as_posix()}\n" for value in values)
-    path.write_text(text, encoding="utf-8", newline="\n")
+    _write_if_changed(path, text.encode("utf-8"))
 
 
 def prepare(
@@ -413,20 +425,14 @@ def prepare(
                 output / f"{output_name}.txt",
                 [support_by_value[value] for value in values],
             )
-    (output / "recomp-include.txt").write_text(
-        f"{recomp_include.as_posix()}\n", encoding="utf-8", newline="\n"
-    )
-    (output / "inventory-source.txt").write_text(
-        f"{inventory.as_posix()}\n", encoding="utf-8", newline="\n"
-    )
-    (output / "symbol-inventory.json").write_bytes(inventory_bytes)
+    _write_text_line(output / "recomp-include.txt", recomp_include)
+    _write_text_line(output / "inventory-source.txt", inventory)
+    _write_if_changed(output / "symbol-inventory.json", inventory_bytes)
     if cpu_inventory is not None and cpu_inventory_bytes is not None:
-        (output / "cpu-inventory-source.txt").write_text(
-            f"{cpu_inventory.as_posix()}\n", encoding="utf-8", newline="\n"
-        )
-        (output / "cpu-section-inventory.json").write_bytes(cpu_inventory_bytes)
+        _write_text_line(output / "cpu-inventory-source.txt", cpu_inventory)
+        _write_if_changed(output / "cpu-section-inventory.json", cpu_inventory_bytes)
     for member, payload in semantic_product_bytes.items():
-        (output / f"{member.replace('_', '-')}.json").write_bytes(payload)
+        _write_if_changed(output / f"{member.replace('_', '-')}.json", payload)
 
 
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
