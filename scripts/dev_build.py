@@ -37,6 +37,7 @@ from generated_code_store import (  # noqa: E402
     remove_stale_leftovers, remove_tree, store_entry_path, store_key,
 )
 from local_app_data import jfg_root, local_app_data  # noqa: E402
+from msvc_toolchain import find_visual_studio, msvc_environment, visual_studio_tools  # noqa: E402
 from sccache_launcher import (  # noqa: E402
     SERVER_PORT_VARIABLE, CompilerCache, choose_launcher, choose_server_port, launcher_change,
     launcher_configure_arguments, read_excluded_port_ranges, sccache_environment,
@@ -265,68 +266,6 @@ def cache_generator(cmake_cache: str) -> str | None:
     """Return the generator a CMakeCache.txt names, or None when it names none."""
     match = CMAKE_CACHE_GENERATOR.search(cmake_cache)
     return match.group(1).strip() if match else None
-
-
-@dataclass(frozen=True)
-class VisualStudioTools:
-    """The MSVC environment script and Ninja of a Visual Studio 2022 install."""
-
-    vcvars: Path
-    ninja: Path
-
-
-VCVARS_PATH = "VC/Auxiliary/Build/vcvars64.bat"
-NINJA_PATH = "Common7/IDE/CommonExtensions/Microsoft/CMake/Ninja/ninja.exe"
-
-
-def visual_studio_tools(install: Path) -> VisualStudioTools:
-    """Return vcvars64.bat and the bundled ninja.exe of an install; fail naming a missing one."""
-    tools = VisualStudioTools(vcvars=install / VCVARS_PATH, ninja=install / NINJA_PATH)
-    for tool in (tools.vcvars, tools.ninja):
-        if not tool.is_file():
-            raise ValueError(f"Required tool missing: {tool}. Install the Visual Studio 2022 C++ desktop "
-                             "tools with CMake support.")
-    return tools
-
-
-# Printed between vcvars64.bat's banner and the `set` listing of the environment it leaves.
-ENVIRONMENT_MARKER = "===ENVIRONMENT==="
-
-
-def parse_environment_listing(listing: str) -> dict[str, str]:
-    """Return the variables of a `set` listing that follows ENVIRONMENT_MARKER."""
-    _, marker, variables = listing.partition(ENVIRONMENT_MARKER)
-    if not marker:
-        raise ValueError("vcvars64.bat did not finish; the MSVC environment is unknown.")
-    environment = {}
-    for line in variables.splitlines():
-        name, separator, value = line.partition("=")
-        # cmd keeps per-drive working folders as hidden "=C:" variables; skip them.
-        if separator and name:
-            environment[name] = value
-    return environment
-
-
-def find_visual_studio() -> Path:
-    """Return the VS 2022 install with C++ tools that vswhere reports, as find_cmake searches it."""
-    base = Path(os.environ.get("ProgramFiles(x86)", "C:/Program Files (x86)"))
-    vswhere = base / "Microsoft Visual Studio/Installer/vswhere.exe"
-    if not vswhere.is_file():
-        raise ValueError(f"Required tool missing: {vswhere}")
-    found = subprocess.check_output([str(vswhere), "-latest", "-products", "*",
-                                     "-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
-                                     "-property", "installationPath"], text=True).strip().splitlines()
-    if not found:
-        raise ValueError("Install Visual Studio 2022 C++ desktop tools with CMake support.")
-    return Path(found[0])
-
-
-def msvc_environment(vcvars: Path) -> dict[str, str]:
-    """Run vcvars64.bat and return the x64 MSVC environment it leaves."""
-    # cmd /s strips the outer quotes and keeps the quoted path with spaces intact.
-    command = f'cmd /d /s /c ""{vcvars}" >nul && echo {ENVIRONMENT_MARKER} && set"'
-    listing = subprocess.run(command, capture_output=True, text=True, errors="replace", check=False).stdout
-    return parse_environment_listing(listing)
 
 
 def read_workspace_state(workspace: Path) -> WorkspaceState:
