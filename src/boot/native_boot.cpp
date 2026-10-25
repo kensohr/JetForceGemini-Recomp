@@ -105,6 +105,7 @@
 #include "jfg/runtime/pc_rumble_output.hpp"
 #include "jfg/runtime/pc_camera_visibility.hpp"
 #include "jfg/runtime/support_log.hpp"
+#include "../renderer/video_settings_warnings_log.hpp"
 #include "jfg/runtime/support_snapshot.hpp"
 #include <iterator>
 #include "jfg/runtime/rt64_overlay_address.hpp"
@@ -6125,9 +6126,11 @@ bool initialize_live_renderer(State &state, LiveRt64Window &window) {
     wchar_t* config_path = nullptr;
     std::size_t size = 0;
     (void)_wdupenv_s(&config_path, &size, L"JFG_VIDEO_CONFIG");
-    auto settings = jfg::load_video_settings(config_path == nullptr ? std::filesystem::path{} : std::filesystem::path(config_path));
+    const std::filesystem::path video_ini = config_path == nullptr ? std::filesystem::path{} : std::filesystem::path(config_path);
+    auto settings = jfg::load_video_settings(video_ini);
     std::free(config_path);
     if (!settings) return std::nullopt;
+    jfg::log_video_settings_warnings(video_ini);
     char* text = nullptr;
     (void)_dupenv_s(&text, &size, "JFG_EXPERIMENTAL_RENDER_FPS");
     if (text != nullptr) {
@@ -6173,7 +6176,7 @@ bool initialize_live_renderer(State &state, LiveRt64Window &window) {
        jfg::Rt64MemoryLayout::host_word_swapped, true, true,
        video_settings->mode == jfg::FrameRateMode::custom ? video_settings->fps : 0U,
        video_settings->mode == jfg::FrameRateMode::unlimited, video_settings->vsync,
-       video_settings->output},
+       video_settings->output, video_settings->crt_filter, video_settings->crt_curvature},
       error);
   std::fflush(stdout);
   (void)_dup2(saved_stdout, _fileno(stdout));

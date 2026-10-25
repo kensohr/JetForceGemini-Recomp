@@ -78,6 +78,8 @@ struct Rt64ShellConfiguration {
     bool unlimited_presentation = false;
     bool vsync = true;
     VideoOutput video_output = VideoOutput::enhanced;
+    CrtPreset crt_filter = CrtPreset::off;
+    bool crt_curvature = false;
 };
 
 struct Rt64RdramRange {

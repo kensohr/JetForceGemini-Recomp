@@ -6,19 +6,22 @@ namespace jfg::frontend {
 // WM_APP + 24 is the runtime-to-launcher display-aspect notification.
 inline constexpr UINT kVideoState = WM_APP + 25;
 inline constexpr ULONG_PTR kVideoApply = 0x4a564431;
-inline constexpr std::uint32_t kVideoRequestVersion = 5;
+inline constexpr std::uint32_t kVideoRequestVersion = 7;
 struct VideoRequest {
   std::uint32_t version = kVideoRequestVersion, mode = 0, fps = 60, vsync = 1;
   std::uint32_t fullscreen = 0, window_size = 0, pause_inactive = 0;
   std::uint32_t fog_percent = 100;
   std::uint32_t blur = static_cast<std::uint32_t>(BlurMode::reduced);
   std::uint32_t video_output = static_cast<std::uint32_t>(VideoOutput::enhanced);
+  std::uint32_t crt_filter = static_cast<std::uint32_t>(CrtPreset::off);
+  std::uint32_t crt_curvature = 0;
 };
 inline constexpr std::array<std::array<int, 2>, 5> video_sizes{
     {{0, 0}, {1280, 720}, {1920, 1080}, {1600, 900}, {2560, 1440}}};
 inline bool valid_video_request(const VideoRequest &v) {
   return v.version == kVideoRequestVersion && v.fog_percent <= 100 && v.blur <= 2 && v.mode <= 2 && v.fps >= 60 && v.fps <= 1000 &&
          v.vsync <= 1 && v.fullscreen <= 1 && v.pause_inactive <= 1 &&
-         v.window_size < video_sizes.size() && v.video_output <= 1;
+         v.window_size < video_sizes.size() && v.video_output <= 1 &&
+         valid_crt_preset(static_cast<CrtPreset>(v.crt_filter)) && v.crt_curvature <= 1;
 }
 } // namespace jfg::frontend

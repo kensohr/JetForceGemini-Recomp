@@ -91,7 +91,7 @@ static void check_video_output_protocol() {
   request.version = 4;
   demand(!jfg::frontend::valid_video_request(request), "reject protocol without video output");
   request = {};
-  demand(request.version == 5 && request.video_output == 0, "default request carries Enhanced");
+  demand(request.version == jfg::frontend::kVideoRequestVersion && request.video_output == 0, "default request carries Enhanced");
   request.video_output = 1;
   demand(jfg::frontend::valid_video_request(request), "Original video output protocol valid");
   request.video_output = 2;

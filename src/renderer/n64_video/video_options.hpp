@@ -3,7 +3,18 @@
 // Video core: reusable N64 video output for RT64-based recompilations.
 // Code in this folder must not depend on any one game or launcher; a project
 // configures it only through VideoOptions.
+#include <cstdint>
+
 namespace n64_video {
+
+// The display the CRT filter simulates on top of Original video output (see
+// crt_filter.hpp), or Off. The values are the CRT shader's preset ids.
+enum class CrtPreset : std::uint32_t {
+    off = 0,
+    rgb_monitor = 1,
+    composite_tv = 2,
+    svideo_tv = 3,
+};
 
 struct VideoOptions {
     // Show the game as the console sent it to the TV: native resolution
@@ -13,6 +24,12 @@ struct VideoOptions {
     // samples and each draw's render mode, and the VI pass runs the VI's own
     // anti-aliasing and divot filter on them.
     bool original_video_output = false;
+    // Under Original video output, the VI pass draws the frame through this
+    // CRT preset instead of RT64's pixel-scaling filter. Ignored otherwise.
+    CrtPreset crt_preset = CrtPreset::off;
+    // Under a CRT preset, the CRT pass bends the picture like a CRT tube,
+    // with a vignette and rounded corners. Ignored without a CRT preset.
+    bool crt_curvature = false;
 };
 
 // The options in effect for the running renderer. apply_to_rt64 sets them;

@@ -5,6 +5,9 @@
 #define NOMINMAX
 #endif
 #include "../../launcher/native/video_settings_dialog.hpp"
+#include "../../launcher/native/crt_filter_dialog.hpp"
+#include "../../launcher/native/crt_curvature_dialog.hpp"
+#include "../../launcher/native/video_output_dialog.hpp"
 #include "../../launcher/native/video_settings_resource.h"
 #include <algorithm>
 #include <array>
@@ -35,6 +38,9 @@ void enable_controls(HWND window) {
     EnableWindow(GetDlgItem(window, id), custom);
   EnableWindow(GetDlgItem(window, IDC_VIDEO_WINDOW_SIZE),
                selection(window, IDC_VIDEO_WINDOW_MODE) == 0);
+  const VideoOutput output = selected_video_output(window);
+  enable_crt_filter_control(window, output);
+  enable_crt_curvature_control(window, output, selected_crt_filter(window));
 }
 void close_dialog(HWND window, VideoDialogModel &model, INT_PTR result) {
   if (model.modal)
@@ -49,9 +55,9 @@ bool apply(HWND window, VideoDialogModel &model) {
       static_cast<unsigned>(selection(window, IDC_VIDEO_WINDOW_SIZE));
   candidate.pause_inactive =
       IsDlgButtonChecked(window, IDC_VIDEO_PAUSE) == BST_CHECKED;
-  candidate.rendering.output = selection(window, IDC_VIDEO_OUTPUT) == 1
-                                   ? VideoOutput::original
-                                   : VideoOutput::enhanced;
+  candidate.rendering.output = selected_video_output(window);
+  candidate.rendering.crt_filter = selected_crt_filter(window);
+  candidate.rendering.crt_curvature = selected_crt_curvature(window);
   candidate.rendering.vsync =
       IsDlgButtonChecked(window, IDC_VIDEO_VSYNC) == BST_CHECKED;
   const int mode = selection(window, IDC_VIDEO_FRAME_MODE);
@@ -108,6 +114,8 @@ INT_PTR CALLBACK procedure(HWND window, UINT message, WPARAM wparam,
     selection(window, IDC_VIDEO_OUTPUT,
               model->settings.rendering.output == VideoOutput::original ? 1
                                                                         : 0);
+    init_crt_filter_control(window, model->settings.rendering.crt_filter);
+    init_crt_curvature_control(window, model->settings.rendering.crt_curvature);
     selection(window, IDC_VIDEO_FRAME_MODE,
               model->settings.rendering.mode == FrameRateMode::custom      ? 1
               : model->settings.rendering.mode == FrameRateMode::unlimited ? 2
