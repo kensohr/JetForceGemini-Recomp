@@ -255,8 +255,7 @@ float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET
         uint gammaDither;
         uint noiseFrame;
         // CRT filter (final VI draw): the CRT preset id (0 off), the picture
-        // rectangle's size in output pixels and screen curvature (0 or 1;
-        // reserved).
+        // rectangle's size in output pixels and screen curvature (0 or 1).
         uint crtPreset;
         float crtOutputWidth;
         float crtOutputHeight;
@@ -391,7 +390,7 @@ build_compute_shader(rt64 "src/shaders/CoverageEstimateCS.hlsl")]==])
         pushConstants.crtPreset = crtPreset;
         pushConstants.crtOutputWidth = viewport.width;
         pushConstants.crtOutputHeight = viewport.height;
-        pushConstants.crtCurvature = 0;]==])
+        pushConstants.crtCurvature = n64_video::crt_shader_curvature(n64_video::active_options());]==])
         jfg_rt64_patch_replace([==[    void VIRenderer::getViewportAndScissor(]==] [==[    // Draws the frame into prepass.texture, one row per framebuffer row and
     // one column per sample of the active scanline: reduced to the console's
     // 16-bit colour (16-bit framebuffers only), anti-aliased or

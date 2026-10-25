@@ -27,8 +27,9 @@ inline jfg::LogLevel video_core_log_level(n64_video::LogLevel level) {
     return jfg::LogLevel::warning;
 }
 
-// Reports which CRT preset Original video output draws through. Under
-// Enhanced the stored preset is ignored, so nothing is reported.
+// Reports which CRT preset Original video output draws through, and whether
+// it bends the picture (screen curvature). Under Enhanced the stored preset
+// is ignored, so nothing is reported.
 inline void log_crt_filter(const n64_video::VideoOptions& options, CrtPreset stored) {
     if (!options.original_video_output)
         return;
@@ -37,6 +38,8 @@ inline void log_crt_filter(const n64_video::VideoOptions& options, CrtPreset sto
         (n64_video::crt_filter_active(options)
             ? "; the VI pass scales the frame through it instead of RT64's pixel-scaling filter"
             : ""));
+    if (n64_video::crt_shader_curvature(options) != 0)
+        log_original_video_output(jfg::LogLevel::info, "Screen curvature on; the CRT filter bends the picture");
 }
 
 // Applies JFG's video settings to RT64's user configuration. Call it before
@@ -46,6 +49,7 @@ inline void apply_video_options(const Rt64ShellConfiguration& configuration,
     n64_video::VideoOptions options;
     options.original_video_output = configuration.video_output == VideoOutput::original;
     options.crt_preset = video_core_crt_preset(configuration.crt_filter);
+    options.crt_curvature = configuration.crt_curvature;
     // The core reports coverage statuses and the VI pre-pass's gamma dither
     // whenever Original video output runs, with or without a coverage estimate.
     if (options.original_video_output) {

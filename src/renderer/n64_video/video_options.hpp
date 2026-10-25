@@ -25,6 +25,9 @@ struct VideoOptions {
     // Under Original video output, the VI pass draws the frame through this
     // CRT preset instead of RT64's pixel-scaling filter. Ignored otherwise.
     CrtPreset crt_preset = CrtPreset::off;
+    // Under a CRT preset, the CRT pass bends the picture like a CRT tube,
+    // with a vignette and rounded corners. Ignored without a CRT preset.
+    bool crt_curvature = false;
 };
 
 // The options in effect for the running renderer. apply_to_rt64 sets them;
