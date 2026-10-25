@@ -5,6 +5,7 @@
 #define NOMINMAX
 #endif
 #include "../../launcher/native/video_settings_dialog.hpp"
+#include "../../launcher/native/crt_filter_dialog.hpp"
 #include "../../launcher/native/video_settings_resource.h"
 #include <algorithm>
 #include <array>
@@ -35,6 +36,9 @@ void enable_controls(HWND window) {
     EnableWindow(GetDlgItem(window, id), custom);
   EnableWindow(GetDlgItem(window, IDC_VIDEO_WINDOW_SIZE),
                selection(window, IDC_VIDEO_WINDOW_MODE) == 0);
+  enable_crt_filter_control(window, selection(window, IDC_VIDEO_OUTPUT) == 1
+                                        ? VideoOutput::original
+                                        : VideoOutput::enhanced);
 }
 void close_dialog(HWND window, VideoDialogModel &model, INT_PTR result) {
   if (model.modal)
@@ -52,6 +56,7 @@ bool apply(HWND window, VideoDialogModel &model) {
   candidate.rendering.output = selection(window, IDC_VIDEO_OUTPUT) == 1
                                    ? VideoOutput::original
                                    : VideoOutput::enhanced;
+  candidate.rendering.crt_filter = selected_crt_filter(window);
   candidate.rendering.vsync =
       IsDlgButtonChecked(window, IDC_VIDEO_VSYNC) == BST_CHECKED;
   const int mode = selection(window, IDC_VIDEO_FRAME_MODE);
@@ -108,6 +113,7 @@ INT_PTR CALLBACK procedure(HWND window, UINT message, WPARAM wparam,
     selection(window, IDC_VIDEO_OUTPUT,
               model->settings.rendering.output == VideoOutput::original ? 1
                                                                         : 0);
+    init_crt_filter_control(window, model->settings.rendering.crt_filter);
     selection(window, IDC_VIDEO_FRAME_MODE,
               model->settings.rendering.mode == FrameRateMode::custom      ? 1
               : model->settings.rendering.mode == FrameRateMode::unlimited ? 2
