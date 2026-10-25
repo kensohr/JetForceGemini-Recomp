@@ -72,6 +72,7 @@ Build-only changes, which change how the game is built, not how it plays:
   [sccache](https://github.com/mozilla/sccache) when it is installed.
   `--bundle` refreshes a local launcher bundle for testing, and `--help`
   lists the other options. It is a separate script: `build_from_rom.py` and
-  release builds are unchanged. **Status:** done.
+  release builds are unchanged. **Status:** done. **More:**
+  [docs/development/dev-builds.md](docs/development/dev-builds.md)
 
 **Merged upstream:** none yet.
