@@ -22,6 +22,7 @@ import sys
 import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from dev_bundle_launcher_source import LAUNCHER_BUILD_COMMAND, check_launcher_source  # noqa: E402
 from local_app_data import jfg_root  # noqa: E402
 from package_beta import RUNTIME_FILES, digest, runtime_inputs, runtime_manifest  # noqa: E402
 
@@ -34,8 +35,6 @@ MANIFEST_VERSION = "dev"
 TEMPORARY_SUFFIX = ".tmp-dev-bundle"
 # A launcher or game that is just closing releases its files within a second or two.
 LOCK_RETRY_DELAYS_SECONDS = (0.5, 1.0, 2.0)
-LAUNCHER_BUILD_COMMAND = (r"powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build_launcher.ps1 "
-                          r"-OutputDirectory $env:LOCALAPPDATA\JFG\l")
 
 
 @dataclass(frozen=True)
@@ -126,6 +125,8 @@ class RefreshResult:
     bundle: Path
     copied: list[PlannedCopy]
     manifest_written: bool
+    # Set when the launcher was built from other or unknown launcher sources than the runtime's checkout.
+    launcher_warning: str | None = None
 
 
 class BundleLockedError(RuntimeError):
@@ -279,10 +280,14 @@ def refresh_dev_bundle(bundle: Path, jfg_root: Path, sources: BundleSources, *,
         raise ValueError(problem)
     bundle = bundle.resolve()
     checked = check_sources(sources)
+    # Only a warning: a launcher from another branch is sometimes what the developer wants to test.
+    launcher_warning = check_launcher_source(sources.launcher, sources.checkout, checked.identity)
+    if launcher_warning:
+        LOG.warning("%s", launcher_warning)
     plan = plan_copies(checked.facts, read_bundle_files(bundle))
     LOG.debug("Copy plan for %s: %s", bundle, [(copy.name, copy.reason) for copy in plan])
     if not plan and (bundle / DEV_MARKER_NAME).is_file():
-        return RefreshResult(bundle, [], manifest_written=False)
+        return RefreshResult(bundle, [], manifest_written=False, launcher_warning=launcher_warning)
 
     bundle.mkdir(parents=True, exist_ok=True)
     marker = dev_marker(sources, checked.identity, datetime.now(timezone.utc))
@@ -293,7 +298,7 @@ def refresh_dev_bundle(bundle: Path, jfg_root: Path, sources: BundleSources, *,
     runtime_copied = any(copy.name in RUNTIME_FILES for copy in plan)
     if runtime_copied:
         install_file(bundle, MANIFEST_NAME, json_writer(checked.manifest), replacer)
-    return RefreshResult(bundle, plan, manifest_written=runtime_copied)
+    return RefreshResult(bundle, plan, manifest_written=runtime_copied, launcher_warning=launcher_warning)
 
 
 BUNDLE_FOLDER = Path("p") / "dev"
@@ -347,5 +352,7 @@ def refresh_after_build(args: argparse.Namespace, executable: Path, checkout: Pa
     print("Development bundle: " + str(result.bundle), flush=True)
     if not result.copied:
         print("  up to date", flush=True)
+    if result.launcher_warning:
+        print("  Warning: " + result.launcher_warning, flush=True)
     print("Start the launcher to test: " + str(result.bundle / LAUNCHER_NAME), flush=True)
     print("Never publish the development bundle. It contains code compiled from your ROM.", flush=True)
