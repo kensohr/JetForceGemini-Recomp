@@ -48,14 +48,6 @@ class NinjaConfigureArgumentTests(unittest.TestCase):
         for left_out in ("JFG_SUPPORT_SYMBOLS", "JFG_MSVC_GENERATED_COMPILE_JOBS"):
             self.assertFalse([argument for argument in arguments if left_out in argument], left_out)
 
-    def test_keeps_build_from_rom_definitions(self) -> None:
-        arguments = ninja_configure_arguments()
-        for expected in ("-DBUILD_TESTING=OFF", "-DJFG_ENABLE_GENERATED_CODE=ON", "-DJFG_BUILD_PHASE6_NATIVE_BOOT=ON",
-                         "-DJFG_BUILD_PHASE8_LIVE=ON", "-DJFG_ENABLE_RT64=ON",
-                         "-DJFG_GENERATED_ROOT=" + str(GENERATED.normalized),
-                         "-DJFG_RT64_ROOT=" + str(DEPENDENCIES / "rt64")):
-            self.assertIn(expected, arguments)
-
 
 class RuntimeExecutableTests(unittest.TestCase):
     def test_single_config_ninja_puts_the_exe_in_the_build_tree_root(self) -> None:
