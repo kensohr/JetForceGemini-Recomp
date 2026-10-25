@@ -6,6 +6,7 @@
 // Usage: jfg_crt_filter_ui_tests.exe <new-artifact-directory> [--no-captures].
 #include "../native_ui.cpp"
 #include <stdexcept>
+#include <tuple>
 static fs::path home;
 static unsigned checks = 0;
 static bool capture_images = true;
@@ -215,7 +216,27 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
            "search finds the CRT filter");
 
     pointer("video-tab-display");
+    {
+      std::string order;
+      for (auto *button = element("video-crt-off"); button; button = button->GetNextSibling())
+        order += button->GetId() + " ";
+      demand(order == "video-crt-off video-crt-composite-tv video-crt-svideo-tv video-crt-rgb-monitor ",
+             "CRT presets show as Off / Composite TV / S-Video TV / RGB monitor");
+    }
     pointer("video-output-original");
+    for (const auto &[id, preset, image] :
+         {std::tuple{"video-crt-composite-tv", jfg::CrtPreset::composite_tv, "display-crt-composite.tga"},
+          std::tuple{"video-crt-svideo-tv", jfg::CrtPreset::svideo_tv, "display-crt-svideo.tga"}}) {
+      pointer(id);
+      demand(ui.draft.rendering.crt_filter == preset && element(id)->IsClassSet("selected") &&
+                 !element("video-crt-rgb-monitor")->IsClassSet("selected"),
+             "a TV preset is selected");
+      surface->context->ProcessMouseMove(0, 0, 0);
+      capture(image);
+      pointer("video-apply");
+      accepted();
+      demand(jfg::load_video_settings(profile / "video.ini")->crt_filter == preset, "Apply persists a TV preset");
+    }
     pointer("video-crt-off");
     pointer("video-apply");
     accepted();

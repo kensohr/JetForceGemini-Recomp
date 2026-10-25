@@ -55,22 +55,26 @@ int main() {
   check(SendDlgItemMessageW(window, IDC_VIDEO_CRT_FILTER, CB_GETCOUNT, 0, 0) ==
             static_cast<LRESULT>(jfg::crt_presets.size()),
         "one choice per CRT preset");
+  // The drop-down lists crt_presets in order.
+  int rgb_monitor = 0;
+  while (jfg::crt_presets[static_cast<std::size_t>(rgb_monitor)].preset != jfg::CrtPreset::rgb_monitor)
+    ++rgb_monitor;
   check(selected_crt() == 0 && !crt_enabled(), "default is Off, disabled under Enhanced");
   choose(IDC_VIDEO_OUTPUT, 1);
   check(crt_enabled(), "Original enables the CRT filter");
-  choose(IDC_VIDEO_CRT_FILTER, 1);
+  choose(IDC_VIDEO_CRT_FILTER, rgb_monitor);
   apply();
   check(applies == 1 && accepted.rendering.crt_filter == jfg::CrtPreset::rgb_monitor,
         "Apply returns RGB monitor");
   choose(IDC_VIDEO_OUTPUT, 0);
-  check(!crt_enabled() && selected_crt() == 1, "Enhanced disables the CRT filter and keeps it");
+  check(!crt_enabled() && selected_crt() == rgb_monitor, "Enhanced disables the CRT filter and keeps it");
   apply();
   check(applies == 2 && accepted.rendering.crt_filter == jfg::CrtPreset::rgb_monitor &&
             accepted.rendering.output == jfg::VideoOutput::enhanced,
         "Apply keeps the disabled CRT preset");
   SendMessageW(window, WM_COMMAND, IDCANCEL, 0);
   window = jfg::frontend::create_video_settings(owner, model);
-  check(selected_crt() == 1 && !crt_enabled(), "reopen retains the CRT preset, disabled");
+  check(selected_crt() == rgb_monitor && !crt_enabled(), "reopen retains the CRT preset, disabled");
   SendMessageW(window, WM_COMMAND, IDCANCEL, 0);
   DestroyWindow(owner);
   std::cout << "Native CRT filter dialog checks: " << failures << " failures\n";

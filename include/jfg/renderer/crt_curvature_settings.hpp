@@ -26,8 +26,9 @@ inline constexpr bool effective_crt_curvature(const VideoSettings &settings) noe
 }
 
 // One message per line of `text` (a video.ini) whose value parse_video_settings
-// reads as the default because it doesn't know it. The messages leave out the
-// value: video.log carries no text taken from files.
+// reads as the default because it doesn't know it (crt_curvature reads as off,
+// crt_filter as Off). The messages leave out the value: video.log carries no
+// text taken from files.
 inline std::vector<std::string> video_settings_warnings(std::string_view text) {
   std::vector<std::string> warnings;
   while (!text.empty()) {
@@ -37,11 +38,15 @@ inline std::vector<std::string> video_settings_warnings(std::string_view text) {
     if (!line.empty() && line.back() == '\r')
       line.remove_suffix(1);
     const auto equal = line.find('=');
-    if (equal == std::string_view::npos || line.substr(0, equal) != crt_curvature_ini_key)
+    if (equal == std::string_view::npos)
       continue;
-    if (!parse_crt_curvature(line.substr(equal + 1)))
+    const auto key = line.substr(0, equal), value = line.substr(equal + 1);
+    if (key == crt_curvature_ini_key && !parse_crt_curvature(value))
       warnings.push_back("video.ini " + std::string(crt_curvature_ini_key) +
                          " is not 0 or 1; screen curvature reads as off");
+    if (key == crt_filter_ini_key && !parse_crt_preset(value))
+      warnings.push_back("video.ini " + std::string(crt_filter_ini_key) +
+                         " is not a known CRT preset; the CRT filter reads as Off");
   }
   return warnings;
 }
