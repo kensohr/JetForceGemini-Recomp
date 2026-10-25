@@ -33,6 +33,42 @@
 
 include("${CMAKE_CURRENT_LIST_DIR}/rt64_patch_helpers.cmake")
 
+# The video core folder, which holds the files the patch adds to RT64.
+get_filename_component(jfg_n64_video_core_dir "${CMAKE_CURRENT_LIST_DIR}/../src/renderer/n64_video" ABSOLUTE)
+
+# The files the patch adds to RT64: "path in the core folder|path in RT64".
+set(jfg_n64_video_new_files
+    "coverage_layout.h|src/shared/rt64_coverage_layout.h"
+    "crt_filter.h|src/shaders/crt_filter.h"
+    "CrtFilter.hlsli|src/shaders/CrtFilter.hlsli"
+    "rt64_patch/CoverageEstimateCS.hlsl|src/shaders/CoverageEstimateCS.hlsl"
+    "rt64_patch/CoverageRecord.hlsli|src/shaders/CoverageRecord.hlsli"
+    "rt64_patch/rt64_coverage_estimate_params.h|src/shared/rt64_coverage_estimate_params.h"
+    "rt64_patch/rt64_coverage_estimate.h|src/render/rt64_coverage_estimate.h")
+
+# The RT64 files the patch changes, as "relative|sha256" pairs of the pinned
+# checkout: those RT64's own build reads (patched in the source view) and the
+# translation units of the rt64 target.
+set(jfg_n64_video_source_view_inputs
+    "src/shaders/VideoInterfacePS.hlsl|f4990ef5edfbdece9c89938a0c4951b3a285f99be9e6d92a415433c0e227f961"
+    "src/shared/rt64_video_interface.h|5d97c854e5d4d0f1f40c5cf06815265baf9218982bcdf698d2b9b9fcf48fdb68"
+    "CMakeLists.txt|4d6cb49be103302c019405794995aac6b526b759f257f4786a7a2a00d4de3fa2"
+    "src/render/rt64_shader_library.h|582214e47482b6f97b57b451a0051ff10711372c29b53e2dc870c398d8c1e075"
+    "src/render/rt64_shader_library.cpp|72421375b232d5449f2f90f153c8452420084f43809c3234bc9727eddfde6ffd"
+    "src/render/rt64_vi_renderer.h|b03a6ea437eefc7a86f163ab72fa04b800ada5b9aa4fc7a15cf60a01378a3bc1"
+    "src/shared/rt64_frame_params.h|dee91d3ff78177821d02d4a27cc43606a58f9a54d7896c5d17b7762a9b29ff3c"
+    "src/shaders/RasterPS.hlsl|957b283411550457573421015580f84ca750c68a050981dbc1a4fe2634507820"
+    "src/shaders/TextureResolvePS.hlsl|141e8f74af1a9228d1b45879b74826b83e6f1cd0988d6bf1a9095d6ad69a34d4"
+    "src/shared/rt64_texture_copy.h|121a219ca6a514fdcb04d77b127e221c1f0407e27f5df719d6453b1c6cf5edc0"
+    "src/render/rt64_render_target.h|5c234505140abe973c98c3d06c0558f6f66f6c67266ecac362c250137b3290d1")
+set(jfg_n64_video_target_unit_inputs
+    "src/render/rt64_vi_renderer.cpp|0159b441fd4872ef30a49d7603f4570d8858084004c20dd6646f51039241fa7b"
+    "src/hle/rt64_present_queue.cpp|023dc3f4bc74bf6863e37ad1781fb32eaa543a7713bd8b9a3757b2262a1a1e52"
+    "src/render/rt64_render_target.cpp|0dee0d19a4be22c4fa34b7ef793e3d4f75a07ab0d31252f9a23a2a0355edb41d"
+    "src/render/rt64_framebuffer_renderer.cpp|73870c23b2340611b930b668d52aec9e687fd74b7da310962b7b1ef35dee015d"
+    "src/render/rt64_raster_shader.cpp|5e5de4bbd8a22192e857c277bae5af033b8606a6464aa73863d2efe0fd0a0d4d"
+    "src/hle/rt64_workload_queue.cpp|6e53030e8899c42347b51e67879fcb9679ad487ac067c192612c432d85bca4a4")
+
 # Applies the patches for `relative` to `contents`.
 function(jfg_n64_video_patch_contents relative)
     if(relative STREQUAL "src/shaders/VideoInterfacePS.hlsl")
@@ -582,38 +618,16 @@ endfunction()
 # fog patch), and adds the patch's new RT64 files. `original_root` is the
 # pinned checkout, `source_view` the copy RT64 is built from.
 function(jfg_n64_video_patch_source_view original_root source_view)
-    # Paths relative to the video core folder.
-    set(core_files "${PROJECT_SOURCE_DIR}/src/renderer/n64_video")
-    set(new_files
-        "coverage_layout.h|src/shared/rt64_coverage_layout.h"
-        "crt_filter.h|src/shaders/crt_filter.h"
-        "CrtFilter.hlsli|src/shaders/CrtFilter.hlsli"
-        "rt64_patch/CoverageEstimateCS.hlsl|src/shaders/CoverageEstimateCS.hlsl"
-        "rt64_patch/CoverageRecord.hlsli|src/shaders/CoverageRecord.hlsli"
-        "rt64_patch/rt64_coverage_estimate_params.h|src/shared/rt64_coverage_estimate_params.h"
-        "rt64_patch/rt64_coverage_estimate.h|src/render/rt64_coverage_estimate.h")
-    foreach(new_file IN LISTS new_files)
+    foreach(new_file IN LISTS jfg_n64_video_new_files)
         jfg_rt64_patch_split_pair("${new_file}" name relative)
         # The copy happens at configure time, so editing a source reconfigures.
-        set_property(DIRECTORY "${PROJECT_SOURCE_DIR}" APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${core_files}/${name}")
-        file(READ "${core_files}/${name}" contents)
+        set_property(DIRECTORY "${PROJECT_SOURCE_DIR}" APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${jfg_n64_video_core_dir}/${name}")
+        file(READ "${jfg_n64_video_core_dir}/${name}" contents)
         string(REPLACE "\r\n" "\n" contents "${contents}")
         jfg_rt64_patch_write("${source_view}/${relative}" "${contents}")
     endforeach()
 
-    set(inputs
-        "src/shaders/VideoInterfacePS.hlsl|f4990ef5edfbdece9c89938a0c4951b3a285f99be9e6d92a415433c0e227f961"
-        "src/shared/rt64_video_interface.h|5d97c854e5d4d0f1f40c5cf06815265baf9218982bcdf698d2b9b9fcf48fdb68"
-        "CMakeLists.txt|4d6cb49be103302c019405794995aac6b526b759f257f4786a7a2a00d4de3fa2"
-        "src/render/rt64_shader_library.h|582214e47482b6f97b57b451a0051ff10711372c29b53e2dc870c398d8c1e075"
-        "src/render/rt64_shader_library.cpp|72421375b232d5449f2f90f153c8452420084f43809c3234bc9727eddfde6ffd"
-        "src/render/rt64_vi_renderer.h|b03a6ea437eefc7a86f163ab72fa04b800ada5b9aa4fc7a15cf60a01378a3bc1"
-        "src/shared/rt64_frame_params.h|dee91d3ff78177821d02d4a27cc43606a58f9a54d7896c5d17b7762a9b29ff3c"
-        "src/shaders/RasterPS.hlsl|957b283411550457573421015580f84ca750c68a050981dbc1a4fe2634507820"
-        "src/shaders/TextureResolvePS.hlsl|141e8f74af1a9228d1b45879b74826b83e6f1cd0988d6bf1a9095d6ad69a34d4"
-        "src/shared/rt64_texture_copy.h|121a219ca6a514fdcb04d77b127e221c1f0407e27f5df719d6453b1c6cf5edc0"
-        "src/render/rt64_render_target.h|5c234505140abe973c98c3d06c0558f6f66f6c67266ecac362c250137b3290d1")
-    foreach(input IN LISTS inputs)
+    foreach(input IN LISTS jfg_n64_video_source_view_inputs)
         jfg_rt64_patch_split_pair("${input}" relative expected)
         jfg_rt64_patch_check_input("video core" "${original_root}" "${relative}" "${expected}")
         file(READ "${source_view}/${relative}" contents)
@@ -631,12 +645,7 @@ endfunction()
 function(jfg_n64_video_patch_rt64_target original_root core_include)
     jfg_rt64_patch_target_units("video core" "${original_root}" jfg_n64_video_patch_contents
         "${CMAKE_CURRENT_BINARY_DIR}/generated/rt64-n64-video"
-        "src/render/rt64_vi_renderer.cpp|0159b441fd4872ef30a49d7603f4570d8858084004c20dd6646f51039241fa7b"
-        "src/hle/rt64_present_queue.cpp|023dc3f4bc74bf6863e37ad1781fb32eaa543a7713bd8b9a3757b2262a1a1e52"
-        "src/render/rt64_render_target.cpp|0dee0d19a4be22c4fa34b7ef793e3d4f75a07ab0d31252f9a23a2a0355edb41d"
-        "src/render/rt64_framebuffer_renderer.cpp|73870c23b2340611b930b668d52aec9e687fd74b7da310962b7b1ef35dee015d"
-        "src/render/rt64_raster_shader.cpp|5e5de4bbd8a22192e857c277bae5af033b8606a6464aa73863d2efe0fd0a0d4d"
-        "src/hle/rt64_workload_queue.cpp|6e53030e8899c42347b51e67879fcb9679ad487ac067c192612c432d85bca4a4")
+        ${jfg_n64_video_target_unit_inputs})
     target_include_directories(rt64 PRIVATE "${core_include}")
     target_sources(rt64 PRIVATE
         "${PROJECT_SOURCE_DIR}/src/renderer/n64_video/rt64_patch/rt64_coverage_estimate.cpp")
