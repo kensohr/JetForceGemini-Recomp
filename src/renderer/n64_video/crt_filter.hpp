@@ -25,4 +25,10 @@ constexpr std::uint32_t crt_shader_preset(const VideoOptions &options) {
     return crt_filter_active(options) ? std::uint32_t(options.crt_preset) : crt::CrtPresetOff;
 }
 
+// The CRT shader's curvature flag for these options (1 bends the picture);
+// 0 when the filter doesn't run.
+constexpr std::uint32_t crt_shader_curvature(const VideoOptions &options) {
+    return (crt_filter_active(options) && options.crt_curvature) ? 1U : 0U;
+}
+
 } // namespace n64_video

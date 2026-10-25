@@ -1,5 +1,6 @@
 #pragma once
 #include "../native/video_settings_protocol.hpp"
+#include "crt_curvature_ui.hpp"
 #include "crt_filter_ui.hpp"
 #include <RmlUi/Core.h>
 #include <RmlUi/Core/Elements/ElementFormControlInput.h>
@@ -29,6 +30,7 @@ struct Ui final : Rml::EventListener {
                          const jfg::VideoSettings &b) {
     return a.mode == b.mode && a.vsync == b.vsync && a.blur == b.blur &&
            a.output == b.output && a.crt_filter == b.crt_filter &&
+           a.crt_curvature == b.crt_curvature &&
            (a.mode != jfg::FrameRateMode::custom || a.fps == b.fps);
   }
   bool dirty() const {
@@ -73,6 +75,7 @@ struct Ui final : Rml::EventListener {
       request.blur = static_cast<unsigned>(candidate.rendering.blur);
       request.video_output = static_cast<unsigned>(candidate.rendering.output);
       request.crt_filter = static_cast<unsigned>(candidate.rendering.crt_filter);
+      request.crt_curvature = candidate.rendering.crt_curvature ? 1U : 0U;
       request.fullscreen = candidate.fullscreen;
       request.window_size = candidate.window_size;
       request.pause_inactive = candidate.pause_inactive;
@@ -108,6 +111,7 @@ struct Ui final : Rml::EventListener {
          ? "Shows the game at its native 320 x 240, scaled to fill the window height."
          : "Renders at a higher resolution that scales with the window.");
     refresh_crt_filter(doc, draft.rendering);
+    refresh_crt_curvature(doc, draft.rendering);
     selected("video-vsync", draft.rendering.vsync);
     static_cast<Rml::ElementFormControlInput*>(el("video-fog"))->SetValue(std::to_string(draft.rendering.fog_percent));
     text("video-fog-value",std::to_string(draft.rendering.fog_percent)+"%");
@@ -183,6 +187,7 @@ struct Ui final : Rml::EventListener {
       {"size",0,"window size resolution dimensions 1280 720 1600 900 1920 1080 2560 1440"},
       {"output",0,"video output enhanced original native resolution 320 240 pixels sharp n64 console"},
       {"crt",0,crt_filter_search_keywords},
+      {"curvature",0,crt_curvature_search_keywords},
       {"pause",0,"pause inactive background focus"},
       {"vsync",1,"vsync v-sync vertical sync display tearing refresh"},
       {"blur",1,"motion blur trails ghosting sickness nausea"},
@@ -209,7 +214,8 @@ struct Ui final : Rml::EventListener {
       if(show){++counts[row.tab];++total;}
     }
     const bool changed[]={draft.fullscreen!=saved.fullscreen||draft.window_size!=saved.window_size||draft.pause_inactive!=saved.pause_inactive||
-      draft.rendering.output!=saved.rendering.output||draft.rendering.crt_filter!=saved.rendering.crt_filter,
+      draft.rendering.output!=saved.rendering.output||draft.rendering.crt_filter!=saved.rendering.crt_filter||
+      draft.rendering.crt_curvature!=saved.rendering.crt_curvature,
       draft.rendering.vsync!=saved.rendering.vsync||draft.rendering.blur!=saved.rendering.blur,
       draft.rendering.mode!=saved.rendering.mode||fpsText!=std::to_string(saved.rendering.fps),
       draft.rendering.fog_percent!=saved.rendering.fog_percent};
@@ -314,6 +320,9 @@ struct Ui final : Rml::EventListener {
       draft.rendering.output = jfg::VideoOutput::original;
     else if (choose_crt_filter(id, draft.rendering)) {
       // One of the CRT filter card's buttons.
+    }
+    else if (choose_crt_curvature(id, draft.rendering)) {
+      // The Screen curvature switch.
     }
     else if (id == "video-vsync")
       draft.rendering.vsync = !draft.rendering.vsync;
