@@ -75,25 +75,43 @@ float3 CrtRowColor(Texture2D<float4> source, int2 sourceSize, float sourceX, int
 // - outputPosition: the pixel's centre, in output pixels from the rectangle's
 //   top-left corner; outputSize: the rectangle's size in output pixels.
 // - preset: a CRT preset id from crt_filter.h (not CrtPresetOff).
-// - curvature: screen curvature; reserved, not applied yet.
+// - curvature: screen curvature. The picture bends by the preset's curvature
+//   and fits inside the rectangle, black outside, with a vignette and rounded
+//   corners; the mask stays on whole output pixels. Off leaves the picture
+//   flat and fills the rectangle.
 // - signalGamma: an exponent the source still needs before it is the
 //   display's signal (a console's gamma stage, for example); 1 for none.
 // Returns the sRGB-encoded colour, alpha 1.
 float4 CrtFilter(Texture2D<float4> source, int2 sourceSize, float2 outputPosition, float2 outputSize, uint preset, bool curvature, float signalGamma) {
     const uint rowsPerScanline = CrtRowsPerScanline(uint(sourceSize.y));
     const uint scanlineCount = CrtScanlineCount(uint(sourceSize.y));
-    const float sourceX = outputPosition.x / outputSize.x * float(sourceSize.x);
-    const float scanlinePosition = CrtScanlinePosition(outputPosition.y, outputSize.y, scanlineCount);
+    // Where the picture is sampled: the output position, warped by curvature.
+    const float2 picturePosition = float2(
+        CrtCurvedX(outputPosition.x, outputPosition.y, outputSize.x, outputSize.y, preset, curvature),
+        CrtCurvedY(outputPosition.x, outputPosition.y, outputSize.x, outputSize.y, preset, curvature));
+    // The vignette and rounded corners, in linear light before the mask.
+    float shade = 1.0f;
+    if (curvature) {
+        shade = CrtVignette(picturePosition.x, picturePosition.y, outputSize.x, outputSize.y) *
+            CrtPictureCoverage(picturePosition.x, picturePosition.y, outputSize.x, outputSize.y);
+        if (shade <= 0.0f) {
+            return float4(0.0f, 0.0f, 0.0f, 1.0f);
+        }
+    }
+
+    const float sourceX = picturePosition.x / outputSize.x * float(sourceSize.x);
+    const float scanlinePosition = CrtScanlinePosition(picturePosition.y, outputSize.y, scanlineCount);
     const int scanline = int(floor(scanlinePosition));
     const float distance = scanlinePosition - (float(scanline) + 0.5f);
 
     // The signal blur's kernels depend only on the preset.
     const CrtSignalKernels kernels = CrtMakeSignalKernels(preset);
-    const float3 above = CrtRowColor(source, sourceSize, sourceX, scanline - 1, rowsPerScanline, signalGamma, preset, kernels);
-    const float3 centre = CrtRowColor(source, sourceSize, sourceX, scanline, rowsPerScanline, signalGamma, preset, kernels);
-    const float3 below = CrtRowColor(source, sourceSize, sourceX, scanline + 1, rowsPerScanline, signalGamma, preset, kernels);
+    const float3 above = shade * CrtRowColor(source, sourceSize, sourceX, scanline - 1, rowsPerScanline, signalGamma, preset, kernels);
+    const float3 centre = shade * CrtRowColor(source, sourceSize, sourceX, scanline, rowsPerScanline, signalGamma, preset, kernels);
+    const float3 below = shade * CrtRowColor(source, sourceSize, sourceX, scanline + 1, rowsPerScanline, signalGamma, preset, kernels);
 
-    // The mask follows whole output pixels.
+    // The mask follows whole output pixels, not the warp (a warped mask would
+    // land between pixels and beat with them).
     const uint column = uint(max(floor(outputPosition.x), 0.0f));
     const uint row = uint(max(floor(outputPosition.y), 0.0f));
     const float3 light = float3(

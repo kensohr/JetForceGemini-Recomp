@@ -1,5 +1,6 @@
 #pragma once
 #include "blur_settings.hpp"
+#include "crt_curvature.hpp"
 #include "crt_preset.hpp"
 #include <charconv>
 #include <filesystem>
@@ -21,6 +22,7 @@ struct VideoSettings {
   unsigned fog_percent = 100;
   VideoOutput output = VideoOutput::enhanced;
   CrtPreset crt_filter = CrtPreset::off;
+  bool crt_curvature = false;
 };
 inline bool valid_video_output(VideoOutput output) {
   return output == VideoOutput::enhanced || output == VideoOutput::original;
@@ -112,6 +114,10 @@ parse_video_settings(std::string_view text) {
       bit = 128;
       // Unknown values (a typo, or a preset of a newer build) read as Off.
       result.crt_filter = parse_crt_preset(value).value_or(CrtPreset::off);
+    } else if (key == crt_curvature_ini_key) {
+      bit = 256;
+      // Unknown values read as off; video_settings_warnings reports them.
+      result.crt_curvature = parse_crt_curvature(value).value_or(false);
     } else
       return std::nullopt;
     if (seen & bit)
@@ -133,7 +139,8 @@ inline std::string serialize_video_settings(const VideoSettings &settings) {
          "\nfps=" + std::to_string(settings.fps) +
          "\nvsync=" + (settings.vsync ? "1\n" : "0\n") + "blur=" + blur + "\nfog_percent=" + std::to_string(settings.fog_percent) +
          "\nvideo_output=" + output +
-         "\ncrt_filter=" + std::string(crt_preset_ini_value(settings.crt_filter)) + "\n";
+         "\ncrt_filter=" + std::string(crt_preset_ini_value(settings.crt_filter)) +
+         "\n" + std::string(crt_curvature_ini_key) + "=" + std::string(crt_curvature_ini_value(settings.crt_curvature)) + "\n";
 }
 // Missing configuration uses the original rendering mode. Corrupt or unreadable
 // configuration is reported to the caller rather than silently changing modes.
